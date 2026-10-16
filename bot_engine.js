@@ -13,16 +13,44 @@
 //   {"event":"error","message":...}
 //   {"event":"end","reason":...}
 //   {"event":"chatSent","text":...}
+//   {"event":"bookResult","ok":bool,"message":...}
+//   {"event":"bookProgress","nextPage":int,"nextBook":int,"done":int,"total":int}
 //   {"event":"msaCode","user_code":..., "verification_uri":...}
 // Commands (stdin, one JSON per line):
 //   {"type":"chat","text":...}
 //   {"type":"setAutoeat","enabled":bool}
 //   {"type":"setQuiz","enabled":bool}
+//   {"type":"writeBook","pages":[...],"startPage":int,"bookStart":int,"signBook":bool,"titleTemplate":str,"startText":...,"endText":...,"endDrop":bool,"autoGetBook":bool,"pagesPerBook":int}
+//   {"type":"clearBook"}
+//   {"type":"bookControl","action":"stop"|"pause"}
 //   {"type":"ping"}
 //   {"type":"quit"}
 
 const fs = require('fs');
 const readline = require('readline');
+
+// --- 给外置登录(yggdrasil)的 HTTP 请求加 20s 硬超时 ---
+// yggdrasil 用的是 node-fetch 且没设超时，皮肤站(sessionserver/join)挂掉时会一直挂住。
+// 在加载 mineflayer（会间接加载 yggdrasil）之前，把 node-fetch 换成带 AbortSignal.timeout 的版本。
+const AUTH_TIMEOUT_MS = parseInt(process.env.AAFM_AUTH_TIMEOUT_MS || '20000', 10) || 20000;
+try {
+    const nodeFetch = require('node-fetch');
+    if (nodeFetch && !nodeFetch.__aafmTimeout && typeof AbortSignal !== 'undefined'
+        && typeof AbortSignal.timeout === 'function') {
+        const wrapped = function (url, options) {
+            const opts = Object.assign({}, options || {});
+            if (!opts.signal) {
+                try { opts.signal = AbortSignal.timeout(AUTH_TIMEOUT_MS); } catch (e) { /* ignore */ }
+            }
+            return nodeFetch(url, opts);
+        };
+        Object.assign(wrapped, nodeFetch);
+        wrapped.__aafmTimeout = true;
+        wrapped.default = wrapped;
+        require.cache[require.resolve('node-fetch')].exports = wrapped;
+    }
+} catch (e) { /* 没有 node-fetch 就跳过 */ }
+
 const mineflayer = require('mineflayer');
 
 function emitEvent(obj) {
@@ -292,6 +320,93 @@ function ensureEnd(reason) {
     emitEvent({ event: 'end', reason: String(reason == null ? '' : reason) });
 }
 
+// --- Document -> book and quill (书与笔) ----------------------------------
+const bookwriter = require('./bookwriter');
+
+// Set when the GUI asks to pause/stop the current write; the writer checks it
+// between books.
+let bookStop = false;
+
+async function handleWriteBook(cmd) {
+    if (!spawnDone) {
+        emitEvent({ event: 'bookResult', ok: false, message: '尚未进入服务器，无法写入书与笔。' });
+        return;
+    }
+    bookStop = false;
+    try {
+        const result = await bookwriter.writeBooks(
+            bot,
+            {
+                pages: cmd.pages,
+                startPage: cmd.startPage,
+                bookStart: cmd.bookStart,
+                signBook: !!(cmd.signBook),
+                titleTemplate: cmd.titleTemplate,
+                startText: cmd.startText,
+                endText: cmd.endText,
+                endDrop: cmd.endDrop,
+                autoGetBook: cmd.autoGetBook !== false,
+                pagesPerBook: cmd.pagesPerBook,
+                shouldStop: () => bookStop,
+                onProgress: (progress) => emitEvent({
+                    event: 'bookProgress',
+                    nextPage: progress.nextPage,
+                    nextBook: progress.nextBook,
+                    done: progress.done,
+                    total: progress.total,
+                    signed: progress.signed
+                })
+            },
+            {
+                log: (level, message) => log(level, message),
+                error: (message) => logError(message)
+            },
+            (text) => { try { sendChat(text); } catch (e) { /* ignore */ } }
+        );
+        emitEvent({
+            event: 'bookResult',
+            ok: !!(result && result.ok),
+            stopped: !!(result && result.stopped),
+            nextPage: (result && result.nextPage) || 0,
+            message: (result && result.message) || ''
+        });
+    } catch (e) {
+        const msg = (e && e.message) ? e.message : String(e);
+        logError('写入书与笔出错: ' + msg);
+        emitEvent({ event: 'bookResult', ok: false, message: '写入失败：' + msg });
+    }
+}
+
+function handleBookControl(cmd) {
+    const action = String((cmd && cmd.action) || 'stop');
+    bookStop = true;
+    log('info', '书与笔写入：收到' + (action === 'pause' ? '暂停' : '停止') + '请求，将在当前这本写完后停下。');
+}
+
+
+async function handleClearBook() {
+    if (!spawnDone) {
+        emitEvent({ event: 'bookResult', ok: false, message: '尚未进入服务器，无法清空书与笔。' });
+        return;
+    }
+    try {
+        const result = await bookwriter.clearBooks(bot, {
+            log: (level, message) => log(level, message),
+            error: (message) => logError(message)
+        });
+        emitEvent({
+            event: 'bookResult',
+            ok: !!(result && result.ok),
+            message: (result && result.message) || ''
+        });
+    } catch (e) {
+        const msg = (e && e.message) ? e.message : String(e);
+        logError('清空书与笔出错: ' + msg);
+        emitEvent({ event: 'bookResult', ok: false, message: '清空失败：' + msg });
+    }
+}
+
+
 bot.on('message', (jsonMsg, position) => {
     if (position === 'game_info') return;
     const raw = jsonMsg.toString();
@@ -344,8 +459,46 @@ bot.on('kicked', (reason, loggedIn) => {
     ensureEnd('kicked');
 });
 
+// 把「外置登录 / 网络服务」类错误归类成友好提示，避免一屏看不懂的原始报错。
+// 典型来源：yggdrasil 包在 LittleSkin sessionserver 返回 5xx(HTML) 时抛出的
+// "Response is not JSON. Status code: 504"。
+function friendlyError(raw, name) {
+    const m = String(raw || '');
+    const n = String(name || '');
+    if (/AbortError/i.test(n) || /aborted|timed?\s?out|timeout/i.test(m)) {
+        return {
+            kind: 'timeout',
+            message: '外置登录 / 网络请求超时（对方服务太慢或不可达），不是你的问题',
+        };
+    }
+    if (/Response is not JSON/i.test(m)
+        || /Status code:\s*5\d\d/i.test(m)
+        || /HTTP\s*5\d\d/i.test(m)
+        || /\b50[0-9]\b/.test(m)) {
+        return {
+            kind: 'http5xx',
+            message: '外置登录 / 会话服务返回 5xx（对方服务暂时不可用，不是你的问题）',
+        };
+    }
+    if (/(ECONNREFUSED|ETIMEDOUT|EAI_AGAIN|ENOTFOUND|socket hang up|fetch failed|network error|getaddrinfo)/i.test(m)) {
+        return {
+            kind: 'network',
+            message: '连接服务失败（网络超时 / 对方不可达）',
+        };
+    }
+    return null;
+}
+
 bot.on('error', (e) => {
-    emitEvent({ event: 'error', message: e && e.message ? e.message : String(e) });
+    const raw = e && e.message ? e.message : String(e);
+    const friendly = friendlyError(raw, e && e.name);
+    if (friendly) {
+        // 交给 Python 去做退避重试 + 明确提示
+        emitEvent({ event: 'serviceError', kind: friendly.kind,
+                    message: friendly.message, detail: raw });
+    } else {
+        emitEvent({ event: 'error', message: raw });
+    }
     // Unlock the UI if we fail before ever reaching spawn (auth / connect errors).
     if (!spawnDone && unlockTimer == null) {
         unlockTimer = setTimeout(() => ensureEnd('error'), 1500);
@@ -394,6 +547,17 @@ function handleCommand(cmd) {
             runtime.quiz.enabled = !!cmd.enabled;
             if (quiz && quiz.config) quiz.config.enabled = runtime.quiz.enabled;
             log('info', 'Quiz ' + (runtime.quiz.enabled ? 'enabled' : 'disabled'));
+            break;
+        case 'writeBook':
+            handleWriteBook(cmd).catch((e) => logError(
+                'writeBook: ' + (e && e.message ? e.message : e)));
+            break;
+        case 'bookControl':
+            handleBookControl(cmd);
+            break;
+        case 'clearBook':
+            handleClearBook().catch((e) => logError(
+                'clearBook: ' + (e && e.message ? e.message : e)));
             break;
         case 'ping':
             emitEvent({ event: 'pong' });

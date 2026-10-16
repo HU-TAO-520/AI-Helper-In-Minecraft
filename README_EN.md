@@ -2,7 +2,7 @@
 
 # AI Helper In Minecraft
 
-**Current version: v3.1**
+**Current version: v3.2.0**
 
 A "client-less" Minecraft AI player: it never opens the game itself. A GUI drives a mineflayer engine to join a server, and a large language model powers the in-game chat behaviour.
 
@@ -30,6 +30,33 @@ A "client-less" Minecraft AI player: it never opens the game itself. A GUI drive
 - Appearance (**Appearance** tab): pick a PNG / JPG as the window background image and dim it; the text theme can be **Auto (from background brightness)** / light background with black text / dark background with white text.
 
 ## Changelog
+
+### v3.2.0
+
+**In-game song requests (new; two options — client mod + bot-side playback by default, zero server changes)**
+
+- **Client mod** ([`mc-song-mod/`](mc-song-mod/README.md)): one source tree building **15 versions** (Fabric **1.21.1 – 26.2**) via `build_all.ps1`; artifacts `dist/Song_<projectVersion>_<gameVersion>.jar`. 1.21.x uses **mojmap + remapping Loom** (`src/legacy`, includes the in-game screen); 26.x is unobfuscated with a rewritten render API → non-remapping Loom + Java 25 (`src/modern`, no screen).
+  - Chat: `[点歌]song`, `[点歌]<netease link>`, `[点歌]<song id>`; press **K** (rebindable in Controls) or send `[点歌]台` to open the in-game **Song Screen**.
+  - Fixed "the key does nothing in production": the keybind reflection hard-coded the dev-only class name `net.minecraft.client.KeyMapping$Category` (obfuscated in production) → now fully name-free reflection (match constructors by parameter types, take a static instance); works across 1.21.1–1.21.11.
+  - Playback: prefers the bot's direct link; local fallback (own Netease cookie, VIP songs included) when the bot is offline; manual `302 https→http` redirect chasing, `SourceDataLine` created lazily after the first decoded frame.
+- **Bot-side playback** (`aafm_py/netease.py`): the bot resolves with its **member account**, so **players never log in**. Song tab: **QR login** (drawn in the GUI), **Verify login** (shows nickname + `vipType` and tests a VIP song), playback toggle, play-text template, stop word, mod-download reply + cooldown.
+  - Measured truth: the legacy endpoint `api/song/enhance/player/url` **does honor membership with a valid cookie** (320k, `trial=0`); only without a cookie you get a 30–45s trial. eapi (AES-128-ECB) is just a fallback.
+- **"Whoever requests it, listens to it" (default, no broadcasting)**: the play data is sent back to the requester via **`/msg`** (`song.privatePlay`); the mod double-checks with `onlyMySong`. Turn both off for an old-style "whole server listens" broadcast.
+- **Fast response**: `song.instantPlay` — a new request starts immediately instead of queueing behind the current song's duration; re-requesting the same song reuses the cached direct link (no new search).
+- **`[点歌]help`**: the bot **whispers** the full usage list (song / stop / screen / help / login / link or id). The help deliberately shows the full-width `【点歌】` form (the bot accepts both, the mod only the half-width one, so help lines are never mistaken for song requests).
+- **Per-player stop**: `[点歌]停止` clears only that player's queue; the mod only honors commands it sent itself.
+- **Anti link-filter**: some servers replace `http(s)://…` with `[链接]` in chat. The bot now sends an **obfuscated direct link** (`¤`/`¥` for the scheme, `. / :` → `· ¦ ∶`, no `?vuutv=…`), so `http`/`://`/`.` never appear; the mod restores it, plus an `id:<songId>` fallback. `#` must not be used (servers treat it as a hex color code) and neither must `&` (MC color code).
+- **Chat channel fix**: many servers re-broadcast player chat as **system messages** (`[title]name » text`), which only reach `ClientReceiveMessageEvents.GAME` — the mod now listens to **`CHAT` + `GAME`** and tells apart "messages I sent" from "server messages", so **another player's request no longer triggers my local fallback**.
+- **`/msg` length guard**: MC's 256 limit applies to the **whole command** (`/msg ` + name + text); too long got the bot kicked (`DecoderException: serverbound/minecraft:chat_command`). The prefix length is now reserved and over-long lines are split/degraded automatically.
+- **Optional server plugin** ([`mc-music-bridge/`](mc-music-bridge/README.md)): for servers where you *can* install plugins — `ZMusicBridge` implements the **ZMusic v5 `zmusic:packet`** protocol itself (no official plugin / cloud API / device_token).
+
+**Other additions**
+
+- **Document → book** (`aafm_py/docbook.py` + `bookwriter.js`): upload `.docx` / `.doc` / `.txt`, auto-wrap by page width and auto-paginate, the bot writes it into a **book and quill** in-game; sign as a written book (title template `{number}`), **write progress / continue / start from volume X**, pause / stop / rewrite, one-click clear.
+- **Log saving** (`aafm_py/log_saver.py`): every log line (chat / server notices / private messages / action bar / app logs) is buffered and flushed to `logs/yyyy_mm_dd_第N次.txt` on day rollover or app close.
+- **Local API launcher** (`run_with_api.py`): hooks `BotEngine` and exposes a local HTTP endpoint so a website can send messages through the running bot (optional, does not modify other files).
+- **QQ relay improvements**: switchable gateway frameworks (SnowLuma default / NapCat) with **independent** configs; SnowLuma auto-reads port + token from `config/onebot_*.json` and picks a working token by a real WS handshake; QQ↔MC direction toggles decoupled; friendly 5xx/timeout messages with exponential backoff; a hard **20s timeout** on all 3rd-party auth requests.
+- **MIT License**: added [`LICENSE`](LICENSE).
 
 ### v3.1
 

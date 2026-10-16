@@ -1,0 +1,15 @@
+name: ZMusicBridge
+version: 1.0.0
+main: com.qingcheng.zmusicbridge.ZMusicBridgePlugin
+api-version: '1.16'
+author: QingCheng3962
+description: 让玩家用 [点歌] 在游戏内点歌；服务端直接向客户端 ZMusic Mod 下发播放（无需 ZMusic 服务端插件 / 云 API / device_token）。
+website: https://github.com/QingCheng3962/AI-Helper-In-Minecraft
+commands:
+  zmplay:
+    description: 点歌
+    usage: /zmplay <歌名>
+    aliases: [点歌, dg]
+  zmstop:
+    description: 停止播放
+    usage: /zmstop

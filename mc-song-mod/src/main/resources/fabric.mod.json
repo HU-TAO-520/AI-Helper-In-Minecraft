@@ -1,0 +1,26 @@
+{
+  "schemaVersion": 1,
+  "id": "songmod",
+  "version": "${version}",
+  "name": "点歌 Mod",
+  "description": "在聊天里发 [点歌]歌名，客户端本地搜索（网易云）并播放。装了本 Mod 的玩家都能听到；服务端无需任何改动。",
+  "authors": [
+    "QingCheng3962"
+  ],
+  "contact": {
+    "homepage": "https://github.com/QingCheng3962/AI-Helper-In-Minecraft"
+  },
+  "license": "MIT",
+  "environment": "client",
+  "entrypoints": {
+    "client": [
+      "com.qingcheng.songmod.SongModClient"
+    ]
+  },
+  "depends": {
+    "fabricloader": ">=0.16.0",
+    "minecraft": "~1.21.11",
+    "java": ">=${java_min}",
+    "fabric-api": "*"
+  }
+}

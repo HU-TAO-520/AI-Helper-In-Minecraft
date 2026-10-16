@@ -17,6 +17,7 @@ APP_CONFIG_FILE = os.path.join(BASE_DIR, 'config.json')
 AI_PLAYER_CONFIG_FILE = os.path.join(BASE_DIR, 'mcai_chat.json')
 AUTH_PROFILE_FILE = os.path.join(BASE_DIR, 'auth_profile.json')
 PROMPT_TEMPLATES_FILE = os.path.join(BASE_DIR, 'mcai_prompt_templates.json')
+BOOK_PROGRESS_FILE = os.path.join(BASE_DIR, 'book_progress.json')
 
 DEFAULT_BASE_URLS = {
     'openai': 'https://api.openai.com/v1',
@@ -401,22 +402,54 @@ class AutoEatConfig:
 
 
 @dataclass
-class QqConfig:
-    """QQ group-chat relay via an OneBot 11 gateway (NapCat / Lagrange / go-cqhttp).
+class OneBotConfig:
+    """OneBot 11 endpoint settings for a single framework.
 
-    - ``mode`` ``forward`` connects out to the gateway's WebSocket server;
-      ``reverse`` listens and lets the gateway connect in.
-    - ``groups`` is the list of group ids to relay; empty means every group.
-    - ``format`` is the MC chat template with ``{group}`` / ``{name}`` /
-      ``{message}`` placeholders. The default uses the ``&7&o`` color codes
-      (dark gray, italic) requested for the relayed lines.
+    SnowLuma and NapCat keep **separate** copies so each can have its own
+    launcher path, port and token without clobbering the other.
     """
-    enabled: bool = False
+    # Folder (or launcher .bat/.exe) used by the 「启动」 button. Empty => the
+    # default location (SnowLuma/ or the bundled NapCat/).
+    launcherPath: str = ''
     mode: str = 'forward'
     url: str = 'ws://127.0.0.1:3001'
     accessToken: str = ''
     listenHost: str = '0.0.0.0'
     listenPort: int = 3002
+    # NapCat only: auto-write the OneBot WS config for newly scanned accounts.
+    autoConfigNewAccounts: bool = True
+
+    def validate(self) -> None:
+        self.launcherPath = str(self.launcherPath or '').strip()
+        if self.mode not in ('forward', 'reverse'):
+            self.mode = 'forward'
+        if not self.url:
+            self.url = 'ws://127.0.0.1:3001'
+        if not self.listenHost:
+            self.listenHost = '0.0.0.0'
+        try:
+            self.listenPort = int(self.listenPort)
+        except (TypeError, ValueError):
+            self.listenPort = 3002
+        self.listenPort = _clamp_int(self.listenPort, 1, 65535)
+        self.accessToken = str(self.accessToken or '')
+        self.autoConfigNewAccounts = bool(self.autoConfigNewAccounts)
+
+
+@dataclass
+class QqConfig:
+    """QQ group-chat relay via an OneBot 11 gateway (SnowLuma / NapCat).
+
+    Connection/launch settings live in the per-framework ``snowluma`` and
+    ``napcat`` sections; ``framework`` selects which one is used. The relay and
+    formatting settings are shared. ``groups`` empty means every group and
+    ``format`` is the MC chat template with ``{group}`` / ``{name}`` /
+    ``{message}``.
+    """
+    enabled: bool = False
+    framework: str = 'snowluma'    # 'snowluma' | 'napcat'
+    snowluma: OneBotConfig = field(default_factory=OneBotConfig)
+    napcat: OneBotConfig = field(default_factory=OneBotConfig)
     groups: List[str] = field(default_factory=list)
     format: str = '&7&o[{group}][{name}]：{message}'
     maxLength: int = 220
@@ -434,6 +467,9 @@ class QqConfig:
     # send the rest to a QQ group. ``mcTargetGroup`` empty => first ``groups``
     # entry; ``[sentQ:群号] 内容`` overrides the target for one message.
     mcToQqEnabled: bool = False
+    # QQ -> MC relay: whether group messages are posted into MC chat. Turning it
+    # off only stops forwarding; the QQ/OneBot connection keeps running.
+    qqToMcEnabled: bool = True
     mcTrigger: str = '[sentQ]'
     mcTargetGroup: str = ''
     mcFormat: str = '[MC] {player}：{message}'
@@ -447,26 +483,28 @@ class QqConfig:
     # auto-reconnecting to avoid repeated logins that can worsen risk control.
     autoReconnect: bool = True
     healthCheckSeconds: int = 30
-    # Watch NapCat's config folder and auto-write the OneBot WS config for every
-    # QQ number that logs in (so newly scanned accounts work without manual setup).
-    autoConfigNewAccounts: bool = True
     # Last QQ number used for quick login (-q), preselected in the picker.
     lastLoginUin: str = ''
 
+    def active(self) -> 'OneBotConfig':
+        """The endpoint config for the currently selected framework."""
+        return self.napcat if self.framework == 'napcat' else self.snowluma
+
     def validate(self) -> None:
-        if self.mode not in ('forward', 'reverse'):
-            self.mode = 'forward'
-        if not self.url:
-            self.url = 'ws://127.0.0.1:3001'
-        if not self.listenHost:
-            self.listenHost = '0.0.0.0'
-        try:
-            self.listenPort = int(self.listenPort)
-        except (TypeError, ValueError):
-            self.listenPort = 3002
-        self.listenPort = _clamp_int(self.listenPort, 1, 65535)
-        if self.accessToken is None:
-            self.accessToken = ''
+        if self.framework not in ('snowluma', 'napcat'):
+            self.framework = 'snowluma'
+        if isinstance(self.snowluma, dict):
+            self.snowluma = OneBotConfig(**{k: v for k, v in self.snowluma.items()
+                                            if k in OneBotConfig.__dataclass_fields__})
+        if isinstance(self.napcat, dict):
+            self.napcat = OneBotConfig(**{k: v for k, v in self.napcat.items()
+                                          if k in OneBotConfig.__dataclass_fields__})
+        if not isinstance(self.snowluma, OneBotConfig):
+            self.snowluma = OneBotConfig()
+        if not isinstance(self.napcat, OneBotConfig):
+            self.napcat = OneBotConfig()
+        self.snowluma.validate()
+        self.napcat.validate()
         if not self.format:
             self.format = '&7&o[{group}][{name}]：{message}'
         self.maxLength = _clamp_int(self.maxLength, 20, 256)
@@ -484,6 +522,8 @@ class QqConfig:
         if not self.mcFormat:
             self.mcFormat = '[MC] {player}：{message}'
         self.mcCooldownSeconds = _clamp_int(self.mcCooldownSeconds, 0, 3600)
+        self.mcToQqEnabled = bool(self.mcToQqEnabled)
+        self.qqToMcEnabled = bool(self.qqToMcEnabled)
         if not self.mcSuccessMsg:
             self.mcSuccessMsg = '&a@{player}转述成功'
         if not self.mcFailureMsg:
@@ -498,6 +538,7 @@ class QqConfig:
         self.autoReconnect = bool(self.autoReconnect)
         self.healthCheckSeconds = _clamp_int(self.healthCheckSeconds, 0, 3600)
         self.imagePublicBase = str(self.imagePublicBase or '').strip().rstrip('/')
+        self.lastLoginUin = str(self.lastLoginUin or '').strip()
 
 
 @dataclass
@@ -607,6 +648,104 @@ class AppearanceConfig:
 
 
 @dataclass
+class DocBookConfig:
+    """Document -> in-game book and quill (书与笔) settings.
+
+    - ``pageChars``    : max characters per page (Java Edition limit is 1024).
+    - ``pageLines``    : max rendered lines per page (Java Edition fits ~14).
+    - ``pagesPerBook`` : pages per book (Java Edition limit is 100).
+    - ``startText``    : spoken in game right before writing (may be empty).
+    - ``endText``      : spoken in game after writing (may be empty).
+    - ``endDrop``      : drop the book after writing.
+    - ``autoGetBook``  : in creative mode obtain a book and quill if missing.
+    - ``signBook``     : sign each book into a written book (成书) instead of
+                         leaving it as a book and quill.
+    - ``titleTemplate``: title used when signing; ``{number}`` is replaced by the
+                         book number (digits only), e.g. ``《资本论》P{number}``.
+    - ``lastFile``     : last document path, remembered between sessions.
+    """
+    pageChars: int = 1024
+    pageLines: int = 14
+    pagesPerBook: int = 100
+    startText: str = ''
+    endText: str = ''
+    endDrop: bool = False
+    autoGetBook: bool = True
+    signBook: bool = False
+    titleTemplate: str = ''
+    lastFile: str = ''
+
+    def validate(self) -> None:
+        self.pageChars = _clamp_int(self.pageChars, 1, 1024)
+        # A Java book page only fits 14 lines; never allow more (成书会截断).
+        self.pageLines = _clamp_int(self.pageLines, 1, 14)
+        self.pagesPerBook = _clamp_int(self.pagesPerBook, 1, 100)
+        self.startText = str(self.startText or '')
+        self.endText = str(self.endText or '')
+        self.endDrop = bool(self.endDrop)
+        self.autoGetBook = bool(self.autoGetBook)
+        self.signBook = bool(self.signBook)
+        self.titleTemplate = str(self.titleTemplate or '')
+        self.lastFile = str(self.lastFile or '')
+
+
+@dataclass
+class SongConfig:
+    """游戏内点歌（客户端 Mod 方案：玩家装 songmod，聊天里发 ``[点歌]歌名`` 本地播放，
+    服务端无需任何改动）。
+
+    - ``trigger``             : 触发词，Mod 与机器人共用，默认 ``[点歌]``。
+    - ``replyEnabled``        : 机器人看到 ``[点歌]`` 时是否在公屏回一条 Mod 下载链接
+                                （提醒没装 Mod、听不到的人）。
+    - ``modUrl``              : 点歌 Mod 的下载链接（发布到 GitHub Releases 后填这里）。
+    - ``replyText``           : 回复文案，留空用默认模板；可用 ``{url}`` 占位。
+    - ``replyCooldownSeconds``: 机器人回复的冷却（秒），避免刷屏。
+    """
+    trigger: str = '[点歌]'
+    stopWord: str = '停止'
+    replyEnabled: bool = True
+    modUrl: str = ''
+    replyText: str = ''
+    replyCooldownSeconds: int = 20
+    # 机器人用会员 Cookie 解析歌曲，并把「可播放直链」发到公屏；客户端 Mod 只负责播放。
+    postPlayLink: bool = True
+    # 网易云登录 Cookie（含 MUSIC_U）。在「点歌」页扫码登录后自动写入。
+    neteaseCookie: str = ''
+    # 发出播放数据时的文案模板（后面会自动追加 " | 直链"）。
+    # 可用 {player} 点歌的人、{music} 歌名 - 歌手、{title} 歌名、{artist} 歌手。
+    playText: str = '{player} 点了一首 {music}'
+    # 新点歌是否**立刻插播**（不等当前这首放完）。
+    # True：新点歌 1 秒内就发出去，Mod 收到新直链会切歌（当前这首被打断）；
+    # False：老老实实按歌长排队，但客户端 Mod 等不到直链会走 30s 本地兜底（不推荐）。
+    instantPlay: bool = True
+    # 是否**只放给点歌的人**（谁点谁听）：True = 播放数据用 /msg **私聊**发给点歌的人，
+    # 公屏不再出现点歌消息、其他玩家的 Mod 不会跟着响；False = 老行为（公屏广播）。
+    # 注：Mod 侧默认 onlyMySong=true，所以即使这里关了，也只有点歌的人会真的播放。
+    privatePlay: bool = True
+
+    def validate(self) -> None:
+        self.trigger = str(self.trigger or '').strip() or '[点歌]'
+        self.stopWord = str(self.stopWord or '').strip() or '停止'
+        self.replyEnabled = bool(self.replyEnabled)
+        self.modUrl = str(self.modUrl or '').strip()
+        self.replyText = str(self.replyText or '')
+        self.replyCooldownSeconds = _clamp_int(self.replyCooldownSeconds, 0, 3600)
+        self.postPlayLink = bool(self.postPlayLink)
+        self.neteaseCookie = str(self.neteaseCookie or '').strip()
+        self.playText = str(self.playText or '').strip() or '{player} 点了一首 {music}'
+        self.instantPlay = bool(self.instantPlay)
+        self.privatePlay = bool(self.privatePlay)
+
+    def default_reply(self) -> str:
+        """默认回复文案（用 {url} 占位下载链接）。"""
+        return '这里有人点歌啦～想听到歌，请安装「点歌 Mod」：{url}'
+
+    def build_reply(self) -> str:
+        text = self.replyText.strip() or self.default_reply()
+        return text.replace('{url}', self.modUrl)
+
+
+@dataclass
 class AppConfig:
     server: ServerConfig = field(default_factory=ServerConfig)
     auth: AuthConfig = field(default_factory=AuthConfig)
@@ -621,6 +760,8 @@ class AppConfig:
     roster: RosterConfig = field(default_factory=RosterConfig)
     reconnect: ReconnectConfig = field(default_factory=ReconnectConfig)
     appearance: AppearanceConfig = field(default_factory=AppearanceConfig)
+    docBook: DocBookConfig = field(default_factory=DocBookConfig)
+    song: SongConfig = field(default_factory=SongConfig)
 
     def validate(self) -> None:
         try:
@@ -644,6 +785,8 @@ class AppConfig:
         self.qq.validate()
         self.reconnect.validate()
         self.appearance.validate()
+        self.docBook.validate()
+        self.song.validate()
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -659,13 +802,29 @@ class AppConfig:
                 if isinstance(data, dict):
                     for section in ('server', 'auth', 'llm', 'quiz', 'autoeat', 'healthAlert',
                                     'verify', 'commandBlock', 'logForward', 'qq', 'roster',
-                                    'reconnect', 'appearance'):
+                                    'reconnect', 'appearance', 'docBook', 'song'):
                         sub = data.get(section)
                         if isinstance(sub, dict):
                             cur = getattr(cfg, section)
                             for k, v in sub.items():
                                 if hasattr(cur, k):
                                     setattr(cur, k, v)
+                    # Migrate the old flat QQ keys (pre per-framework split) into
+                    # the sub-config of the framework that was selected.
+                    qq_data = data.get('qq')
+                    if isinstance(qq_data, dict):
+                        flat_keys = ('mode', 'url', 'accessToken', 'listenHost',
+                                     'listenPort', 'launcherPath', 'autoConfigNewAccounts')
+                        flat = {k: qq_data[k] for k in flat_keys if k in qq_data}
+                        if flat:
+                            fw = ('napcat' if str(qq_data.get('framework', '')).lower() == 'napcat'
+                                  else 'snowluma')
+                            if not isinstance(qq_data.get(fw), dict):
+                                target = getattr(cfg.qq, fw, None)
+                                if target is not None and not isinstance(target, dict):
+                                    for k, v in flat.items():
+                                        if hasattr(target, k):
+                                            setattr(target, k, v)
             except Exception as e:
                 print(f'[mcai] Failed to read {path}, using defaults: {e}')
         cfg.validate()

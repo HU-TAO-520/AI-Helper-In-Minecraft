@@ -1,0 +1,20 @@
+# ZMusicBridge 配置
+# 玩家消息以此开头即视为点歌；也可用 /zmplay <歌名>。
+trigger: "[点歌]"
+
+# 音源：163 = 网易云音乐（免登录，直接把一个可播放的 https 音频直链给客户端 Mod）
+provider: "163"
+
+# true = 全服播放（所有装了 ZMusic Mod 的在线玩家一起听）
+# false = 只给点歌的人播放
+broadcast: true
+
+# 同一玩家两次点歌的冷却（秒）
+cooldown-seconds: 5
+
+# 客户端 Mod 下载音频时附加的请求头。
+# 网易云 CDN 需要 Referer，否则可能被拒。
+# 注意：不要填 host / cookie / authorization / connection 等被协议禁止的头。
+audio-headers:
+  User-Agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+  Referer: "https://music.163.com/"

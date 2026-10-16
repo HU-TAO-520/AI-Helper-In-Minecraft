@@ -1,0 +1,150 @@
+import groovy.json.JsonSlurper
+
+buildscript {
+    repositories {
+        maven { url = 'https://maven.fabricmc.net/' }
+        maven { url = 'https://maven.aliyun.com/repository/public' }
+        mavenCentral()
+        gradlePluginPortal()
+    }
+    dependencies {
+        classpath 'net.fabricmc:fabric-loom:1.19-SNAPSHOT'
+    }
+}
+
+// 目标 MC 版本：默认取 gradle.properties 的 minecraft_version；
+// 多版本编译脚本用 -Pmcver=1.21.4 覆盖。
+def mcver = (findProperty('mcver') ?: project.findProperty('minecraft_version') ?: '1.21.11').toString()
+// 26.x 起 Minecraft 未混淆：用「不重映射」的 Loom，且无需声明 mappings。
+def isModern = mcver.startsWith('26.')
+
+if (isModern) {
+    apply plugin: 'net.fabricmc.fabric-loom'
+} else {
+    apply plugin: 'fabric-loom'
+}
+
+def httpText = { String url ->
+    def conn = new URL(url).openConnection()
+    conn.setConnectTimeout(15000)
+    conn.setReadTimeout(30000)
+    conn.setRequestProperty('User-Agent', 'songmod-build')
+    def stream = conn.getInputStream()
+    try {
+        return stream.getText('UTF-8')
+    } finally {
+        stream.close()
+    }
+}
+
+// fabric-loader：0.20.0 对所有目标版本都可用。
+def loaderVersion = '0.20.0'
+
+// Fabric API 版本表（构建时不再依赖联网；未知版本才联网兜底）。
+def FABRIC_API = [
+        '1.21.1' : '0.116.17+1.21.1',
+        '1.21.2' : '0.106.1+1.21.2',
+        '1.21.3' : '0.114.1+1.21.3',
+        '1.21.4' : '0.119.4+1.21.4',
+        '1.21.5' : '0.128.2+1.21.5',
+        '1.21.6' : '0.128.2+1.21.6',
+        '1.21.7' : '0.129.0+1.21.7',
+        '1.21.8' : '0.136.1+1.21.8',
+        '1.21.9' : '0.134.1+1.21.9',
+        '1.21.10': '0.138.4+1.21.10',
+        '1.21.11': '0.141.6+1.21.11',
+        '26.1'   : '0.145.1+26.1',
+        '26.1.1' : '0.145.4+26.1.1',
+        '26.1.2' : '0.155.3+26.1.2',
+        '26.2'   : '0.161.0+26.2',
+]
+def fabricApiVersion = FABRIC_API[mcver]
+if (fabricApiVersion == null) {
+    // 兜底：联网按 "+<mcver>" 匹配最新版（重试几次）
+    for (int attempt = 0; attempt < 3 && fabricApiVersion == null; attempt++) {
+        try {
+            def xml = httpText('https://maven.fabricmc.net/net/fabricmc/fabric-api/fabric-api/maven-metadata.xml')
+            def all = (xml =~ /<version>([^<]+)<\/version>/).collect { it[1] }
+                    .findAll { it.endsWith('+' + mcver) }
+            if (!all.isEmpty()) {
+                fabricApiVersion = all.last()
+            }
+        } catch (Exception ignored) {
+            Thread.sleep(1000L)
+        }
+    }
+}
+if (fabricApiVersion == null) {
+    throw new GradleException("找不到与 MC ${mcver} 匹配的 Fabric API 版本")
+}
+
+version = project.mod_version
+group = project.maven_group
+
+// 26.x 需要 Java 25；1.21.x 用 Java 21。
+def javaRelease = isModern ? 25 : 21
+
+base {
+    archivesName = "Song_${project.mod_version}_${mcver}"
+}
+
+// 产物名固定为 Song_<项目版本>_<游戏版本>.jar（去掉 Loom 自动追加的 -<version>）
+tasks.named('jar') {
+    archiveVersion = ''
+}
+if (!isModern) {
+    tasks.named('remapJar') {
+        archiveVersion = ''
+    }
+}
+
+logger.lifecycle("== songmod build: MC=${mcver} loader=${loaderVersion} fabric-api=${fabricApiVersion} java=${javaRelease} mappings=${isModern ? 'none(未混淆)' : 'mojmap'} ==")
+
+repositories {
+    maven { url = 'https://maven.aliyun.com/repository/public' }
+    mavenCentral()
+}
+
+dependencies {
+    minecraft "com.mojang:minecraft:${mcver}"
+    if (isModern) {
+        // 26.x 未混淆：用非重映射插件，依赖也用 implementation
+        implementation "net.fabricmc:fabric-loader:${loaderVersion}"
+        implementation "net.fabricmc.fabric-api:fabric-api:${fabricApiVersion}"
+    } else {
+        // 1.21.x：Mojang 官方映射 + 重映射插件
+        mappings loom.officialMojangMappings()
+        modImplementation "net.fabricmc:fabric-loader:${loaderVersion}"
+        modImplementation "net.fabricmc.fabric-api:fabric-api:${fabricApiVersion}"
+    }
+    // MP3 解码，打进 jar（Jar-in-Jar）。版本必须是合法 semver。
+    include(implementation('com.googlecode.soundlibs:jlayer:1.0.1-1'))
+}
+
+processResources {
+    inputs.property "version", project.version
+    inputs.property "minecraft_version", mcver
+    inputs.property "java_min", javaRelease
+    filesMatching("fabric.mod.json") {
+        expand "version": project.version, "minecraft_version": mcver, "java_min": javaRelease
+    }
+}
+
+// 按「Era」选源码：26.x 渲染 API 大改 → 用不带界面的版本。
+sourceSets {
+    main {
+        java {
+            srcDirs = ['src/main/java', isModern ? 'src/modern/java' : 'src/legacy/java']
+        }
+    }
+}
+
+tasks.withType(JavaCompile).configureEach {
+    it.options.encoding = 'UTF-8'
+    it.options.release = javaRelease
+}
+
+java {
+    sourceCompatibility = JavaVersion.toVersion(javaRelease)
+    targetCompatibility = JavaVersion.toVersion(javaRelease)
+}

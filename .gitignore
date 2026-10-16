@@ -6,6 +6,7 @@ config.json
 auth_profile.json
 mcai_chat.json
 runtime_config.json
+book_progress.json
 qq_runtime_config.json
 qq_accounts.json
 pic_http/
@@ -14,3 +15,7 @@ qq_data/
 qq_qrcode.png
 .claude/
 logs/
+/AI QQ Friends/
+# 备份/压缩包/项目内旧副本（别提交进仓库）
+*.rar
+/ai helper in minecraft/

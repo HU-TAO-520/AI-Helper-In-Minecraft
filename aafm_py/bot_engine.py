@@ -117,6 +117,31 @@ class BotEngine:
     def set_quiz(self, enabled: bool) -> bool:
         return self.send({'type': 'setQuiz', 'enabled': bool(enabled)})
 
+    def write_book(self, pages, start_text: str = '', end_text: str = '',
+                   end_drop: bool = False, auto_get_book: bool = True,
+                   pages_per_book: int = 100, start_page: int = 0,
+                   book_start: int = 1, sign_book: bool = False,
+                   title_template: str = '') -> bool:
+        return self.send({
+            'type': 'writeBook',
+            'pages': [str(p) for p in (pages or [])],
+            'startPage': int(start_page or 0),
+            'bookStart': int(book_start or 1),
+            'signBook': bool(sign_book),
+            'titleTemplate': str(title_template or ''),
+            'startText': str(start_text or ''),
+            'endText': str(end_text or ''),
+            'endDrop': bool(end_drop),
+            'autoGetBook': bool(auto_get_book),
+            'pagesPerBook': int(pages_per_book or 100),
+        })
+
+    def book_control(self, action: str = 'stop') -> bool:
+        return self.send({'type': 'bookControl', 'action': str(action or 'stop')})
+
+    def clear_book(self) -> bool:
+        return self.send({'type': 'clearBook'})
+
     def ping(self) -> bool:
         return self.send({'type': 'ping'})
 

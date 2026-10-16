@@ -1,3 +1,6 @@
 httpx>=0.24
 openpyxl>=3.0
 pillow>=9.0
+qrcode>=7.0
+# 可选：只有走 eapi 兜底接口时才需要（机器人主路径用旧接口，不装也能正常工作）
+cryptography>=41.0

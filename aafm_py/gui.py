@@ -12,6 +12,7 @@ import os
 import re
 import subprocess
 import sys
+import threading
 import time
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
@@ -21,6 +22,7 @@ from .config import (AiPlayerConfig, AppConfig, AUTH_PROFILE_FILE,
                      TEMPLATE_ASSISTANT, TEMPLATE_BUDDY, PromptTemplateManager,
                      load_auth_profile)
 from .controller import Controller, BASE_DIR
+from . import docbook
 
 TEMPLATE_BUILTINS = {
     '聊天搭子': TEMPLATE_BUDDY,
@@ -224,6 +226,7 @@ class AiPlayerGUI:
         self.log_text.tag_configure('private', foreground='#c85fb0')
         self.log_text.tag_configure('msa', foreground='#3fa86a')
         self.log_text.tag_configure('qq', foreground='#9a6fd0')
+        self.log_text.tag_configure('song', foreground='#4dd0e1')
 
     def _refresh_background_image(self) -> None:
         """(Re)load the configured background image from disk."""
@@ -302,6 +305,8 @@ class AiPlayerGUI:
         self._build_settings_tab()
         self._build_ai_tab()
         self._build_player_tab()
+        self._build_docbook_tab()
+        self._build_song_tab()
         self._build_roster_tab()
         self._build_qq_tab()
         self._build_reconnect_tab()
@@ -512,6 +517,395 @@ class AiPlayerGUI:
         ttk.Label(frm, text='命中该正则的消息会先联网搜索（留空=默认关键词）',
                   foreground='#888888').grid(row=6, column=0, columnspan=4, sticky='w', padx=4)
         frm.columnconfigure(1, weight=1)
+
+    # ------------------------------------------------------------------
+    # Tab: 文档转书
+    # ------------------------------------------------------------------
+    def _build_docbook_tab(self) -> None:
+        host = ttk.Frame(self.notebook, padding=(8, 8))
+        self.notebook.add(host, text=' 文档转书 ')
+        sc = ScrollFrame(host)
+        sc.pack(fill='both', expand=True)
+        frm = ttk.LabelFrame(
+            sc.inner,
+            text='上传 .docx / .doc / .txt，转换为游戏内的书与笔（书与笔）',
+            padding=8)
+        frm.pack(fill='x', pady=(8, 0))
+
+        self.var_book_file = tk.StringVar()
+        self.var_book_pagelines = tk.StringVar(value='14')
+        self.var_book_perbook = tk.StringVar(value='100')
+        self.var_book_start = tk.StringVar()
+        self.var_book_endtext = tk.StringVar()
+        self.var_book_enddrop = tk.BooleanVar(value=False)
+        self.var_book_autoget = tk.BooleanVar(value=True)
+        self.var_book_sign = tk.BooleanVar(value=False)
+        self.var_book_title = tk.StringVar()
+        self.var_book_startbook = tk.StringVar(value='1')
+
+        ttk.Label(frm, text='文档文件').grid(row=0, column=0, sticky='w', padx=4, pady=3)
+        ttk.Entry(frm, textvariable=self.var_book_file, width=56).grid(
+            row=0, column=1, columnspan=2, sticky='we', padx=4, pady=3)
+        ttk.Button(frm, text='选择文件…', command=self._on_choose_book_file).grid(
+            row=0, column=3, sticky='w', padx=4, pady=3)
+
+        ttk.Label(frm, text='每页最大行数（Java 上限 14）').grid(
+            row=1, column=0, sticky='w', padx=4, pady=3)
+        ttk.Entry(frm, textvariable=self.var_book_pagelines, width=8).grid(
+            row=1, column=1, sticky='w', padx=4, pady=3)
+        ttk.Label(frm, text='每本书最大页数').grid(row=1, column=2, sticky='e', padx=4, pady=3)
+        ttk.Entry(frm, textvariable=self.var_book_perbook, width=8).grid(
+            row=1, column=3, sticky='w', padx=4, pady=3)
+        ttk.Label(frm, text='（每页 1024 字为游戏硬上限，自动保证；分页只按行数）',
+                  foreground='#888888').grid(row=1, column=4, columnspan=2, sticky='w', padx=4, pady=3)
+
+        ttk.Label(frm, text='开始提示（进服发言，可留空）').grid(
+            row=2, column=0, sticky='w', padx=4, pady=3)
+        ttk.Entry(frm, textvariable=self.var_book_start).grid(
+            row=2, column=1, columnspan=5, sticky='we', padx=4, pady=3)
+
+        ttk.Checkbutton(frm, text='写完后把书丢出（多本书时，非最后一本会自动丢出）',
+                        variable=self.var_book_enddrop).grid(
+            row=3, column=0, columnspan=6, sticky='w', padx=4, pady=3)
+
+        ttk.Label(frm, text='结束提示（写完发言，可留空）').grid(
+            row=4, column=0, sticky='w', padx=4, pady=3)
+        ttk.Entry(frm, textvariable=self.var_book_endtext).grid(
+            row=4, column=1, columnspan=5, sticky='we', padx=4, pady=3)
+
+        ttk.Checkbutton(frm, text='创造模式下缺少书与笔时自动获取',
+                        variable=self.var_book_autoget).grid(
+            row=5, column=0, columnspan=6, sticky='w', padx=4, pady=3)
+
+        signrow = ttk.Frame(frm)
+        signrow.grid(row=6, column=0, columnspan=6, sticky='we', padx=4, pady=3)
+        ttk.Checkbutton(signrow, text='编辑为成书（署名）',
+                        variable=self.var_book_sign).pack(side='left')
+        ttk.Label(signrow, text='　书名模板（{number}=第几本，只含数字）：').pack(side='left')
+        ttk.Entry(signrow, textvariable=self.var_book_title, width=40).pack(
+            side='left', fill='x', expand=True)
+        ttk.Label(signrow, text='　例：资本论 P{number}',
+                  foreground='#888888').pack(side='left')
+
+        btns = ttk.Frame(frm)
+        btns.grid(row=7, column=0, columnspan=6, sticky='w', pady=(6, 0))
+        ttk.Button(btns, text='预览分页', command=self._on_preview_book).pack(
+            side='left', padx=(0, 6))
+        ttk.Button(btns, text='写入书与笔', command=self._on_write_book).pack(
+            side='left', padx=(0, 6))
+        ttk.Button(btns, text='清空书与笔内容', command=self._on_clear_book).pack(side='left')
+
+        ctl = ttk.Frame(frm)
+        ctl.grid(row=8, column=0, columnspan=6, sticky='w', pady=(4, 0))
+        ttk.Button(ctl, text='暂停', command=lambda: self._on_book_control('pause')).pack(
+            side='left', padx=(0, 6))
+        ttk.Button(ctl, text='停止', command=lambda: self._on_book_control('stop')).pack(
+            side='left', padx=(0, 6))
+        ttk.Button(ctl, text='重新写入', command=self._on_rewrite_book).pack(
+            side='left', padx=(0, 6))
+        ttk.Button(ctl, text='从未写入的地方开始写入',
+                   command=self._on_continue_book).pack(side='left', padx=(0, 12))
+        ttk.Label(ctl, text='从第').pack(side='left')
+        ttk.Entry(ctl, textvariable=self.var_book_startbook, width=6).pack(side='left', padx=2)
+        ttk.Label(ctl, text='册开始').pack(side='left', padx=(0, 4))
+        ttk.Button(ctl, text='从该册开始写入',
+                   command=self._on_start_from_book).pack(side='left')
+
+        self.book_progress_label = ttk.Label(
+            frm, text='进度：未开始', foreground='#888888')
+        self.book_progress_label.grid(row=9, column=0, columnspan=6, sticky='w', padx=4, pady=(4, 0))
+
+        ttk.Label(sc.inner, text='分页预览（已按书页宽度自动换行、自动翻页）').pack(
+            anchor='w', padx=4, pady=(10, 2))
+        self.book_preview = tk.Text(sc.inner, height=14, wrap='word',
+                                    font=('Consolas', 9), state='disabled')
+        self.book_preview.pack(fill='both', expand=True, padx=4, pady=(0, 4))
+        frm.columnconfigure(1, weight=1)
+        frm.columnconfigure(3, weight=0)
+
+    # ------------------------------------------------------------------
+    # Tab: 玩家资料库
+    # ------------------------------------------------------------------
+    # Tab: 点歌 (客户端 Mod 方案)
+    # ------------------------------------------------------------------
+    def _build_song_tab(self) -> None:
+        host = ttk.Frame(self.notebook, padding=(8, 8))
+        self.notebook.add(host, text=' 点歌 ')
+        sc = ScrollFrame(host)
+        sc.pack(fill='both', expand=True)
+
+        basic = ttk.LabelFrame(sc.inner, text='点歌（客户端 Mod：玩家发 [点歌]歌名 即本地播放）', padding=8)
+        basic.pack(fill='x', pady=(8, 0))
+
+        self.var_song_trigger = tk.StringVar(value='[点歌]')
+        self.var_song_stop_word = tk.StringVar(value='停止')
+        self.var_song_query = tk.StringVar()
+        self.var_song_reply_enabled = tk.BooleanVar(value=True)
+        self.var_song_post_play_link = tk.BooleanVar(value=True)
+        self.var_song_instant_play = tk.BooleanVar(value=True)
+        self.var_song_private_play = tk.BooleanVar(value=True)
+        self.var_song_mod_url = tk.StringVar()
+        self.var_song_reply_text = tk.StringVar()
+        self.var_song_reply_cooldown = tk.StringVar()
+
+        row = ttk.Frame(basic)
+        row.pack(fill='x', pady=3)
+        ttk.Label(row, text='触发词').pack(side='left')
+        ttk.Entry(row, textvariable=self.var_song_trigger, width=10).pack(
+            side='left', padx=(4, 10))
+        ttk.Label(row, text='停止词').pack(side='left')
+        ttk.Entry(row, textvariable=self.var_song_stop_word, width=6).pack(
+            side='left', padx=(4, 10))
+        ttk.Label(row, text='让机器人点歌').pack(side='left')
+        song_entry = ttk.Entry(row, textvariable=self.var_song_query)
+        song_entry.pack(side='left', fill='x', expand=True, padx=(4, 6))
+        song_entry.bind('<Return>', lambda _e: self._on_song_play())
+        ttk.Button(row, text='点歌', command=self._on_song_play).pack(side='left')
+        ttk.Label(basic,
+                  text='点「点歌」= 机器人往公屏发「触发词+歌名」，于是所有装了点歌 Mod 的玩家都会听到。',
+                  foreground='#888888', wraplength=760, justify='left').pack(anchor='w', padx=4)
+
+        reply = ttk.LabelFrame(sc.inner, text='机器人回复 Mod 下载链接（提醒没装 Mod、听不到的人）', padding=8)
+        reply.pack(fill='x', pady=(8, 0))
+        ttk.Checkbutton(reply, text='有人发 [点歌] 时，机器人在公屏回一条下载链接',
+                        variable=self.var_song_reply_enabled).grid(
+            row=0, column=0, columnspan=3, sticky='w', padx=4, pady=3)
+        self._entry(reply, 1, 'Mod 下载链接', self.var_song_mod_url)
+        self._entry(reply, 2, '回复文案（可留空，{url} 会替换成下载链接）', self.var_song_reply_text)
+        self._entry(reply, 3, '回复冷却（秒）', self.var_song_reply_cooldown)
+        reply.columnconfigure(1, weight=1)
+
+        # --- 机器人代播（会员 Cookie） ---
+        play = ttk.LabelFrame(
+            sc.inner, text='机器人代播：用会员账号解析歌曲并发可播放直链（玩家无需各自登录）', padding=8)
+        play.pack(fill='x', pady=(8, 0))
+        ttk.Checkbutton(play, text='有人发 [点歌] 时，机器人解析并发出「播放文案 | 直链」（客户端 Mod 播放）',
+                        variable=self.var_song_post_play_link).grid(
+            row=0, column=0, columnspan=3, sticky='w', padx=4, pady=3)
+        ttk.Checkbutton(play, text='新点歌立刻插播（不等当前这首放完，响应最快；同一首歌再点会直接重播、不重新搜索）',
+                        variable=self.var_song_instant_play).grid(
+            row=7, column=0, columnspan=3, sticky='w', padx=4, pady=(4, 2))
+        ttk.Checkbutton(play, text='只放给点歌的人（谁点谁听）：播放数据用 /msg 私聊发给点歌的人，'
+                                   '公屏不出现点歌消息，别的玩家不会跟着响',
+                        variable=self.var_song_private_play).grid(
+            row=8, column=0, columnspan=3, sticky='w', padx=4, pady=(0, 2))
+        ttk.Label(play, text='播放文案').grid(row=1, column=0, sticky='w', padx=4, pady=3)
+        self.var_song_play_text = tk.StringVar(value='{player} 点了一首 {music}')
+        ttk.Entry(play, textvariable=self.var_song_play_text, width=48).grid(
+            row=1, column=1, columnspan=2, sticky='we', padx=4, pady=3)
+        ttk.Label(play, text='可用 {player} 点歌的人、{music} 歌名 - 歌手、{title} 歌名、{artist} 歌手；'
+                             '后面会自动追加「 | 直链」', foreground='#888888').grid(
+            row=2, column=0, columnspan=3, sticky='w', padx=4)
+        ttk.Label(play, text='网易云登录（会员）').grid(row=3, column=0, sticky='w', padx=4, pady=3)
+        self.var_song_netease_cookie = tk.StringVar()
+        ttk.Entry(play, textvariable=self.var_song_netease_cookie, width=40).grid(
+            row=3, column=1, sticky='we', padx=4, pady=3)
+        netease_btns = ttk.Frame(play)
+        netease_btns.grid(row=3, column=2, sticky='w', padx=4)
+        ttk.Button(netease_btns, text='扫码登录', command=self._on_netease_login).pack(side='left')
+        ttk.Button(netease_btns, text='验证登录', command=self._on_netease_verify).pack(
+            side='left', padx=(4, 0))
+
+        qrrow = ttk.Frame(play)
+        qrrow.grid(row=4, column=0, columnspan=3, sticky='w', padx=4, pady=4)
+        self._netease_qr_label = ttk.Label(qrrow)
+        self._netease_qr_label.pack(side='left')
+        self._netease_qr_photo = None
+        self._netease_url = ''
+        qrbtns = ttk.Frame(qrrow)
+        qrbtns.pack(side='left', anchor='n', padx=8)
+        ttk.Button(qrbtns, text='在浏览器打开登录链接',
+                   command=self._on_netease_open).pack(anchor='w', pady=2)
+        ttk.Button(qrbtns, text='复制登录链接',
+                   command=self._on_netease_copy).pack(anchor='w', pady=2)
+        self._netease_status = tk.StringVar(value='未登录（VIP 歌只能放 45 秒试听）')
+        ttk.Label(play, textvariable=self._netease_status, foreground='#888888',
+                  wraplength=780, justify='left').grid(
+            row=5, column=0, columnspan=3, sticky='w', padx=4, pady=(0, 3))
+        ttk.Label(play, foreground='#888888', wraplength=780, justify='left',
+                  text='点「扫码登录」→ 上面直接出现二维码（也可用浏览器打开链接）→ '
+                       '用【网易云音乐 App】扫一扫并在手机上点确认；成功后 Cookie 会自动填入并保存。\n'
+                       '自己粘贴 Cookie 的话：把浏览器的 music.163.com Cookie（含 MUSIC_U=…）粘到上面，'
+                       '点「验证登录」——会显示账号昵称，并实测一首会员歌能不能拿到完整直链。').grid(
+            row=6, column=0, columnspan=3, sticky='w', padx=4)
+        play.columnconfigure(1, weight=1)
+
+        info = ttk.LabelFrame(sc.inner, text='说明 / 使用方法（服务端零改动）', padding=8)
+        info.pack(fill='x', pady=(8, 0))
+        ttk.Label(info, justify='left', wraplength=780, foreground='#666666',
+                  text=(
+                      '原理：机器人在「点歌」页登录网易云会员后，看到聊天里的 [点歌]歌名 就用会员账号'
+                      '解析出可播放直链并发到公屏，各客户端 Mod 直接播放 —— 相当于“全服点歌”，'
+                      '而**服务端不需要装任何插件**。\n'
+                      '  1) 把点歌 Mod（songmod，Fabric 1.21.1~26.2）放进玩家的 mods/ 文件夹；\n'
+                      '  2) 玩家在聊天里发 [点歌]告白气球，或直接用 Mod 里的「点歌台」界面；\n'
+                      '     （玩家发 [点歌]help 机器人会私聊他全部用法：歌名/停止/台/help/登录）\n'
+                      '  3) 没装 Mod 的人听不到 —— 可用上面的「回复 Mod 下载链接」提醒他。\n\n'
+                      'Mod 的触发词 / 音量 / 界面按键在客户端 config/songmod.json 里改。\n'
+                      '源码：项目目录 mc-song-mod/。'
+                  )).pack(anchor='w', padx=4, pady=4)
+
+    def _on_song_play(self):
+        self._gather_config()
+        trigger = (self.var_song_trigger.get() or '[点歌]').strip() or '[点歌]'
+        query = self.var_song_query.get().strip()
+        if not query:
+            self._append_log('请先输入歌名。', 'warn')
+            return
+        self.controller.send_chat(trigger + query)
+        self._append_log(f'点歌：{trigger}{query}', 'info')
+
+    # --- 网易云扫码登录（机器人代播用） ---
+    def _ui(self, fn):
+        try:
+            self.root.after(0, fn)
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _on_netease_login(self):
+        if getattr(self, '_netease_login_running', False):
+            self._append_log('网易云登录已在进行中…', 'warn')
+            return
+        self._netease_login_running = True
+        self._netease_status.set('正在获取二维码…')
+        self._append_log('正在获取网易云登录二维码…', 'info')
+        threading.Thread(target=self._netease_login_worker, daemon=True).start()
+
+    def _show_netease_qr(self, url):
+        """把登录链接画成二维码显示在界面里。"""
+        self._netease_url = url
+        try:
+            import qrcode
+            from PIL import ImageTk
+            img = qrcode.make(url).resize((200, 200))
+            photo = ImageTk.PhotoImage(img)
+            self._netease_qr_photo = photo   # 必须保留引用
+            self._netease_qr_label.configure(image=photo, text='')
+        except Exception as e:  # noqa: BLE001
+            self._netease_qr_photo = None
+            self._netease_qr_label.configure(
+                image='', text='（生成二维码失败：' + str(e) + '，请用下面按钮打开链接）')
+
+    def _on_netease_open(self):
+        if not self._netease_url:
+            self._append_log('还没有登录链接，先点「扫码登录」。', 'warn')
+            return
+        try:
+            import webbrowser
+            webbrowser.open(self._netease_url)
+        except Exception as e:  # noqa: BLE001
+            self._append_log('打开浏览器失败：' + str(e), 'warn')
+
+    def _on_netease_copy(self):
+        if not self._netease_url:
+            self._append_log('还没有登录链接，先点「扫码登录」。', 'warn')
+            return
+        try:
+            self.root.clipboard_clear()
+            self.root.clipboard_append(self._netease_url)
+            self._append_log('登录链接已复制到剪贴板。', 'info')
+        except Exception as e:  # noqa: BLE001
+            self._append_log('复制失败：' + str(e), 'warn')
+
+    def _netease_login_worker(self):
+        qr = None
+        try:
+            from . import netease
+            qr = netease.QrLogin()
+            unikey = qr.start()
+            if not unikey:
+                self._ui(lambda: self._netease_status.set('获取二维码失败（网易云接口无响应）'))
+                return
+            url = qr.login_url()
+            self._ui(lambda: self._show_netease_qr(url))
+            self._ui(lambda: self._netease_status.set('请用【网易云音乐 App】扫描上方二维码，并在手机上点确认'))
+            self._ui(lambda: self._append_log('网易云扫码登录：二维码已显示在界面里（也点「在浏览器打开登录链接」）。', 'info'))
+            scanned = False
+            for _ in range(120):
+                time.sleep(2)
+                code, cookie = qr.poll()
+                if code == 800:
+                    self._ui(lambda: self._netease_status.set('二维码已过期，请重新点「扫码登录」'))
+                    return
+                if code == 802:
+                    if not scanned:
+                        scanned = True
+                        self._ui(lambda: self._append_log('已扫码，请在手机上点「确认登录」。', 'info'))
+                    self._ui(lambda: self._netease_status.set('已扫码，请在手机上点「确认登录」…'))
+                elif code == 803:
+                    if not cookie:
+                        self._ui(lambda: self._netease_status.set(
+                            '登录成功但没拿到 Cookie（请把界面上的状态发给开发者）'))
+                        self._ui(lambda: self._append_log('网易云 803 但没有 MUSIC_U，请反馈。', 'warn'))
+                        return
+                    self._ui(lambda: self._apply_netease_cookie(cookie))
+                    return
+            self._ui(lambda: self._netease_status.set('登录超时，请重试'))
+        except Exception as e:  # noqa: BLE001
+            msg = str(e)
+            self._ui(lambda: self._netease_status.set('登录出错：' + msg))
+        finally:
+            if qr is not None:
+                qr.close()
+            self._netease_login_running = False
+
+    def _apply_netease_cookie(self, cookie):
+        """把扫码拿到的 Cookie 填进输入框并立即保存到 config.json。"""
+        try:
+            self.var_song_netease_cookie.set(cookie)
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            self.controller.config.song.neteaseCookie = cookie
+            self.controller.config.save()
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            self._netease_status.set('登录成功 ✅ 已保存会员 Cookie：' + (cookie[:24] + '…'))
+        except Exception:  # noqa: BLE001
+            pass
+        self._append_log('网易云登录成功，已保存会员 Cookie。现在可以替玩家播放 VIP 歌了。', 'info')
+
+    # --- 验证登录（自己粘贴的 Cookie 能不能用） ---
+    def _on_netease_verify(self):
+        """验证输入框里的 Cookie：显示账号昵称，并实测一首会员歌能不能播放。"""
+        if getattr(self, '_netease_verify_running', False):
+            self._append_log('正在验证中，请稍候…', 'warn')
+            return
+        cookie = (self.var_song_netease_cookie.get() or '').strip()
+        if not cookie:
+            self._append_log('请先把网易云 Cookie 粘进上面输入框（含 MUSIC_U=…），再点「验证登录」。', 'warn')
+            return
+        self._netease_verify_running = True
+        self._netease_status.set('正在验证 Cookie…')
+        self._append_log('正在验证网易云 Cookie…', 'info')
+        threading.Thread(target=self._netease_verify_worker, args=(cookie,), daemon=True).start()
+
+    def _netease_verify_worker(self, cookie):
+        res = None
+        try:
+            from . import netease
+            res = netease.check_login(cookie)
+        except Exception as e:  # noqa: BLE001
+            res = {'ok': False, 'message': '验证出错：' + str(e)}
+        msg = (res or {}).get('message') or '验证失败'
+        ok = bool((res or {}).get('ok'))
+
+        def done():
+            self._netease_verify_running = False
+            try:
+                self._netease_status.set(msg)
+            except Exception:  # noqa: BLE001
+                pass
+            self._append_log(msg, 'info' if ok else 'warn')
+            if ok:
+                # 验证通过就顺手存进 config.json
+                try:
+                    self.controller.config.song.neteaseCookie = cookie
+                    self.controller.config.save()
+                except Exception:  # noqa: BLE001
+                    pass
+        self._ui(done)
 
     # ------------------------------------------------------------------
     # Tab: 玩家资料库
@@ -872,117 +1266,250 @@ class AiPlayerGUI:
         self._append_log('界面设置已保存。', 'info')
         messagebox.showinfo('aafm AI 玩家', '界面设置已保存。')
 
+    # ------------------------------------------------------------------
+    # 文档转书 actions
+    # ------------------------------------------------------------------
+    def _on_choose_book_file(self) -> None:
+        path = filedialog.askopenfilename(
+            title='选择要转换的文档',
+            filetypes=[('文档', '*.txt *.docx *.doc'), ('所有文件', '*.*')])
+        if not path:
+            return
+        self.var_book_file.set(path)
+        self._on_preview_book()
+
+    def _book_pages(self):
+        """Read the chosen document and split it into pages (or None on error)."""
+        path = self.var_book_file.get().strip()
+        if not path:
+            messagebox.showwarning('aafm', '请先选择要转换的文档。')
+            return None
+        if not os.path.exists(path):
+            messagebox.showerror('aafm', f'文件不存在：\n{path}')
+            return None
+        max_lines = self._parse_int(self.var_book_pagelines.get(), 14)
+        max_lines = max(1, min(docbook.MAX_LINES_PER_PAGE, max_lines))
+        try:
+            # Pagination is driven by the line count; the character count is only
+            # the game's hard limit (1024) used as a safety cap.
+            pages = docbook.load_pages(
+                path, max_chars=docbook.MAX_PAGE_CHARS, max_lines=max_lines)
+        except Exception as e:  # noqa: BLE001
+            messagebox.showerror('aafm', f'读取文档失败：\n{e}')
+            return None
+        return pages
+
+    def _on_preview_book(self) -> None:
+        pages = self._book_pages()
+        if pages is None:
+            return
+        self.book_preview.configure(state='normal')
+        self.book_preview.delete('1.0', 'end')
+        if not pages:
+            self.book_preview.insert('end', '（没有解析到文本内容）')
+        else:
+            total_chars = sum(len(p) for p in pages)
+            self.book_preview.insert(
+                'end', f'共 {len(pages)} 页，{total_chars} 字符。\n'
+                       f'（每页 ≤ {docbook.MAX_LINES_PER_PAGE} 行，行宽按保守字体估算 ≤ '
+                       f'{docbook.PAGE_LINE_WIDTH}px，不会超出书页）\n'
+                       + '=' * 48 + '\n')
+            for i, page in enumerate(pages, 1):
+                lines = page.split('\n')
+                max_w = max((docbook.line_width(x) for x in lines), default=0)
+                self.book_preview.insert(
+                    'end',
+                    f'—— 第 {i} 页 ({len(page)} 字 / {len(lines)} 行 / 最宽 {max_w}px) ——\n')
+                self.book_preview.insert('end', page + '\n\n')
+        self.book_preview.configure(state='disabled')
+        self._append_log(f'已预览分页：{len(pages)} 页。', 'info')
+
+    def _on_write_book(self) -> None:
+        pages = self._book_pages()
+        if pages is None:
+            return
+        if not pages:
+            messagebox.showwarning('aafm', '没有解析到可写入的文本内容。')
+            return
+        self._gather_config()
+        cfg = self.controller.config.docBook
+        if cfg.signBook and not cfg.titleTemplate.strip():
+            if not messagebox.askyesno(
+                    'aafm', '已勾选“编辑为成书”，但书名模板为空，将签名为无标题成书。继续吗？'):
+                return
+        ok = self.controller.write_book(
+            pages,
+            start_text=cfg.startText,
+            end_text=cfg.endText,
+            end_drop=cfg.endDrop,
+            auto_get_book=cfg.autoGetBook,
+            pages_per_book=cfg.pagesPerBook,
+            sign_book=cfg.signBook,
+            title_template=cfg.titleTemplate,
+            doc_file=self.var_book_file.get().strip(),
+            start_page=0, book_start=1)
+        if ok:
+            self._append_log(
+                f'已发送写入指令：{len(pages)} 页（引擎将写入书与笔）。', 'sent')
+        else:
+            self._append_log('写入指令发送失败（未连接或引擎未就绪）。', 'error')
+
+    def _on_book_control(self, action: str) -> None:
+        self._gather_config()
+        self.controller.pause_book(action)
+
+    def _on_continue_book(self) -> None:
+        self._gather_config()
+        self.controller.continue_book()
+
+    def _on_rewrite_book(self) -> None:
+        if not messagebox.askyesno('aafm', '从第一页重新写入？（已记录的进度将被覆盖）'):
+            return
+        self._gather_config()
+        self.controller.rewrite_book()
+
+    def _on_start_from_book(self) -> None:
+        """Start writing from the N-th volume (册/本): page offset + {number}."""
+        pages = self._book_pages()
+        if pages is None:
+            return
+        if not pages:
+            messagebox.showwarning('aafm', '没有解析到可写入的文本内容。')
+            return
+        self._gather_config()
+        cfg = self.controller.config.docBook
+        per_book = max(1, int(cfg.pagesPerBook or 100))
+        total_books = max(1, (len(pages) + per_book - 1) // per_book)
+        book_no = self._parse_int(self.var_book_startbook.get(), 1)
+        if book_no < 1:
+            book_no = 1
+        if book_no > total_books:
+            messagebox.showwarning(
+                'aafm', f'本文档共约 {total_books} 册，起始册号 {book_no} 超出范围。')
+            return
+        start_page = (book_no - 1) * per_book
+        ok = self.controller.write_book(
+            pages,
+            start_text=cfg.startText,
+            end_text=cfg.endText,
+            end_drop=cfg.endDrop,
+            auto_get_book=cfg.autoGetBook,
+            pages_per_book=per_book,
+            sign_book=cfg.signBook,
+            title_template=cfg.titleTemplate,
+            doc_file=self.var_book_file.get().strip(),
+            start_page=start_page, book_start=book_no)
+        if ok:
+            self._append_log(
+                f'已发送写入指令：从第 {book_no} 册（第 {start_page + 1} 页）开始。', 'sent')
+        else:
+            self._append_log('写入指令发送失败（未连接或引擎未就绪）。', 'error')
+
+    def _on_clear_book(self) -> None:
+        if not messagebox.askyesno(
+                'aafm',
+                '确定要清空机器人背包里所有「书与笔」的内容吗？\n'
+                '（只删除书页文字，不删除书与笔本身）'):
+            return
+        if self.controller.clear_book():
+            self._append_log('已发送清空书与笔指令（引擎将删除书页内容）。', 'sent')
+        else:
+            self._append_log('清空指令发送失败（未连接或引擎未就绪）。', 'error')
+
     def _build_qq_frame(self, parent) -> None:
-        frm = ttk.LabelFrame(
-            parent, text='QQ 群聊转述（OneBot 11：NapCat / Lagrange / go-cqhttp）', padding=8)
-        frm.pack(fill='x', pady=(8, 0))
+        # ============ 模块 1：网关设置 ============
+        net = ttk.LabelFrame(parent, text='网关设置（OneBot 11：SnowLuma / NapCat）', padding=8)
+        net.pack(fill='x', pady=(8, 0))
 
+        self.var_qq_framework = tk.StringVar(value='SnowLuma')
         self.var_qq_enabled = tk.BooleanVar(value=False)
-        ttk.Checkbutton(frm, text='启用：把指定 QQ 群的消息转述到 MC 公共聊天',
-                        variable=self.var_qq_enabled,
-                        command=self._on_qq_enabled).grid(
-            row=0, column=0, columnspan=4, sticky='w', padx=4, pady=3)
-
         self.var_qq_mode = tk.StringVar(value='forward')
-        ttk.Label(frm, text='连接模式').grid(row=1, column=0, sticky='w', padx=4, pady=3)
-        mode_box = ttk.Combobox(frm, textvariable=self.var_qq_mode, state='readonly',
-                                values=['forward', 'reverse'], width=12)
-        mode_box.grid(row=1, column=1, sticky='w', padx=4, pady=3)
-        ttk.Label(frm, text='forward=连接网关 / reverse=监听网关连入',
-                  foreground='#888888').grid(row=1, column=2, columnspan=2, sticky='w', padx=4)
-
         self.var_qq_url = tk.StringVar()
-        ttk.Label(frm, text='正向地址').grid(row=2, column=0, sticky='w', padx=4, pady=3)
-        ttk.Entry(frm, textvariable=self.var_qq_url, width=42).grid(
-            row=2, column=1, columnspan=3, sticky='we', padx=4, pady=3)
-
         self.var_qq_token = tk.StringVar()
-        ttk.Label(frm, text='Access Token').grid(row=3, column=0, sticky='w', padx=4, pady=3)
-        ttk.Entry(frm, textvariable=self.var_qq_token, show='*', width=42).grid(
-            row=3, column=1, columnspan=3, sticky='we', padx=4, pady=3)
-
         self.var_qq_listen_host = tk.StringVar()
         self.var_qq_listen_port = tk.StringVar()
-        ttk.Label(frm, text='反向监听').grid(row=4, column=0, sticky='w', padx=4, pady=3)
-        ttk.Entry(frm, textvariable=self.var_qq_listen_host, width=18).grid(
-            row=4, column=1, sticky='w', padx=4, pady=3)
-        ttk.Entry(frm, textvariable=self.var_qq_listen_port, width=8).grid(
-            row=4, column=2, sticky='w', padx=4, pady=3)
+        self.var_qq_launcher = tk.StringVar()
+        self._qq_editing_framework = 'snowluma'
 
+        r = ttk.Frame(net)
+        r.pack(fill='x', pady=2)
+        ttk.Label(r, text='启动框架').pack(side='left')
+        fwbox = ttk.Combobox(r, textvariable=self.var_qq_framework, state='readonly',
+                             values=['SnowLuma', 'NapCat'], width=10)
+        fwbox.pack(side='left', padx=(4, 12))
+        fwbox.bind('<<ComboboxSelected>>', lambda e: self._on_qq_framework_changed())
+
+        r = ttk.Frame(net)
+        r.pack(fill='x', pady=2)
+        self.qq_launcher_label = ttk.Label(r, text='启动路径')
+        self.qq_launcher_label.pack(side='left')
+        ttk.Entry(r, textvariable=self.var_qq_launcher).pack(
+            side='left', fill='x', expand=True, padx=(4, 0))
+
+        r = ttk.Frame(net)
+        r.pack(fill='x', pady=2)
+        ttk.Label(r, text='连接模式').pack(side='left')
+        ttk.Combobox(r, textvariable=self.var_qq_mode, state='readonly',
+                     values=['forward', 'reverse'], width=9).pack(side='left', padx=(4, 10))
+        ttk.Label(r, text='正向地址').pack(side='left')
+        ttk.Entry(r, textvariable=self.var_qq_url).pack(
+            side='left', fill='x', expand=True, padx=(4, 0))
+
+        r = ttk.Frame(net)
+        r.pack(fill='x', pady=2)
+        ttk.Label(r, text='Access Token').pack(side='left')
+        ttk.Entry(r, textvariable=self.var_qq_token, show='*', width=26).pack(
+            side='left', padx=(4, 12))
+        ttk.Label(r, text='反向监听').pack(side='left')
+        ttk.Entry(r, textvariable=self.var_qq_listen_host, width=13).pack(side='left', padx=(4, 2))
+        ttk.Entry(r, textvariable=self.var_qq_listen_port, width=6).pack(side='left')
+
+        r = ttk.Frame(net)
+        r.pack(fill='x', pady=(6, 0))
+        ttk.Button(r, text='启动', command=self._on_qq_launch_framework).pack(side='left', padx=2)
+        ttk.Button(r, text='快速登录', command=self._on_qq_quick_login).pack(side='left', padx=2)
+        ttk.Button(r, text='连接', command=self._on_qq_start).pack(side='left', padx=2)
+        ttk.Button(r, text='重连', command=self._on_qq_reconnect).pack(side='left', padx=2)
+        ttk.Button(r, text='断开', command=self._on_qq_stop).pack(side='left', padx=2)
+        self.qq_status_label = ttk.Label(r, text='未连接', foreground='#999999')
+        self.qq_status_label.pack(side='left', padx=12)
+
+        ttk.Label(net,
+                  text='SnowLuma 填它解压后的目录；NapCat 填含 launcher-win10.bat 的目录（留空用项目自带的 NapCat/）。'
+                       '两个框架的路径 / 地址 / Token 各自独立保存，切换「启动框架」即切换。',
+                  foreground='#888888', wraplength=780, justify='left').pack(anchor='w', padx=2, pady=(4, 0))
+
+        # ============ 模块 2：双向转发 ============
+        relay = ttk.LabelFrame(parent, text='双向转发', padding=8)
+        relay.pack(fill='x', pady=(8, 0))
+
+        q2m = ttk.LabelFrame(relay, text='QQ → MC：群消息转述到游戏公屏', padding=6)
+        q2m.pack(fill='x')
         self.var_qq_groups = tk.StringVar()
-        ttk.Label(frm, text='群号').grid(row=5, column=0, sticky='w', padx=4, pady=3)
-        ttk.Entry(frm, textvariable=self.var_qq_groups, width=42).grid(
-            row=5, column=1, columnspan=3, sticky='we', padx=4, pady=3)
-        ttk.Label(frm, text='多个用逗号/空格分隔；留空=转述全部群',
-                  foreground='#888888').grid(row=5, column=4, sticky='w', padx=4)
-
         self.var_qq_format = tk.StringVar()
-        self.var_qq_image_link = tk.BooleanVar(value=False)
-        self.var_qq_autoreconnect = tk.BooleanVar(value=True)
-        self.var_qq_health = tk.StringVar()
-        self.var_qq_autoconfig = tk.BooleanVar(value=True)
-        ttk.Label(frm, text='转述格式').grid(row=6, column=0, sticky='w', padx=4, pady=3)
-        ttk.Entry(frm, textvariable=self.var_qq_format, width=42).grid(
-            row=6, column=1, columnspan=3, sticky='we', padx=4, pady=3)
-        ttk.Checkbutton(frm, text='图片转链接', variable=self.var_qq_image_link).grid(
-            row=6, column=4, sticky='w', padx=4, pady=3)
+        self.var_qq_to_mc = tk.BooleanVar(value=True)
+        r = ttk.Frame(q2m)
+        r.pack(fill='x', pady=2)
+        ttk.Checkbutton(r, text='启用 QQ → MC（关闭只停止发到游戏，不断开 QQ、不影响 MC → QQ）',
+                        variable=self.var_qq_to_mc,
+                        command=self._on_qq_to_mc).pack(side='left')
+        r = ttk.Frame(q2m)
+        r.pack(fill='x', pady=2)
+        ttk.Label(r, text='群号').pack(side='left')
+        ttk.Entry(r, textvariable=self.var_qq_groups).pack(
+            side='left', fill='x', expand=True, padx=(4, 8))
+        ttk.Label(r, text='多个用逗号/空格分隔；留空=全部群', foreground='#888888').pack(side='left')
+        r = ttk.Frame(q2m)
+        r.pack(fill='x', pady=2)
+        ttk.Label(r, text='转述格式').pack(side='left')
+        ttk.Entry(r, textvariable=self.var_qq_format).pack(
+            side='left', fill='x', expand=True, padx=(4, 8))
+        ttk.Label(r, text='{group} {name} {message}', foreground='#888888').pack(side='left')
+        ttk.Label(q2m, text='图片/表情等非文本以 [图片]/[表情] 占位；勾选「图片转本地链接」后图片会变成链接。',
+                  foreground='#888888', wraplength=780, justify='left').pack(anchor='w', padx=2, pady=(2, 0))
 
-        ttk.Label(frm,
-                  text='占位符：{group}=群名 {name}=昵称 {message}=内容；默认 &7&o 为灰色斜体。'
-                       '图片/表情等非文本会以 [图片] / [表情] 等占位转述；'
-                       '勾选「图片转链接」后图片存到 pic_http/ 并发本地 HTTP 链接。',
-                  foreground='#888888', wraplength=720, justify='left').grid(
-            row=7, column=0, columnspan=5, sticky='w', padx=4, pady=(2, 0))
-
-        self.qq_status_label = ttk.Label(frm, text='未连接', foreground='#999999')
-        self.qq_status_label.grid(row=8, column=0, sticky='w', padx=4, pady=(4, 2))
-
-        btns = ttk.Frame(frm)
-        btns.grid(row=8, column=1, columnspan=4, sticky='w', padx=4, pady=(4, 2))
-        ttk.Button(btns, text='启动', command=self._on_qq_launch_napcat).pack(side='left', padx=2)
-        ttk.Button(btns, text='快速登录', command=self._on_qq_quick_login).pack(side='left', padx=2)
-        ttk.Button(btns, text='连接', command=self._on_qq_start).pack(side='left', padx=2)
-        ttk.Button(btns, text='重连', command=self._on_qq_reconnect).pack(side='left', padx=2)
-        ttk.Button(btns, text='断开', command=self._on_qq_stop).pack(side='left', padx=2)
-
-        # --- 账号安全（可选） ---
-        sec = ttk.LabelFrame(frm, text='账号安全（可选）', padding=6)
-        sec.grid(row=9, column=0, columnspan=5, sticky='we', padx=2, pady=(8, 2))
-        ttk.Checkbutton(sec, text='自动重连', variable=self.var_qq_autoreconnect).grid(
-            row=0, column=0, sticky='w', padx=4, pady=3)
-        ttk.Label(sec, text='在线检测秒').grid(row=0, column=1, sticky='e', padx=4)
-        ttk.Entry(sec, textvariable=self.var_qq_health, width=6).grid(
-            row=0, column=2, sticky='w', padx=4)
-        ttk.Checkbutton(sec, text='自动为新扫码账号写配置', variable=self.var_qq_autoconfig).grid(
-            row=0, column=3, columnspan=2, sticky='w', padx=12, pady=3)
-        ttk.Label(sec, text='连接因疑似风控被关闭、或在线检测连续失败时，会告警并停止自动重连，'
-                            '避免反复登录加重风控；恢复后点「重连」。',
-                  foreground='#888888', wraplength=720, justify='left').grid(
-            row=1, column=0, columnspan=5, sticky='w', padx=4, pady=(2, 0))
-
-        # --- 图片转本地链接 ---
-        img = ttk.LabelFrame(frm, text='图片转本地链接（Python HTTP 服务，仅暴露 /pic_http/）', padding=6)
-        img.grid(row=10, column=0, columnspan=5, sticky='we', padx=2, pady=(8, 2))
-        self.var_qq_img_port = tk.StringVar()
-        self.var_qq_img_base = tk.StringVar()
-        ttk.Label(img, text='监听端口').grid(row=0, column=0, sticky='w', padx=4, pady=3)
-        ttk.Entry(img, textvariable=self.var_qq_img_port, width=8).grid(
-            row=0, column=1, sticky='w', padx=4)
-        ttk.Label(img, text='公网地址').grid(row=1, column=0, sticky='w', padx=4, pady=3)
-        ttk.Entry(img, textvariable=self.var_qq_img_base, width=38).grid(
-            row=1, column=1, columnspan=3, sticky='we', padx=4)
-        ttk.Label(img, text='留空=自动探测公网 IP，例 http://1.2.3.4:8765',
-                  foreground='#888888').grid(row=1, column=4, sticky='w', padx=4)
-        ttk.Label(img, text='图片保存到项目 pic_http/ 下、以时间戳命名；'
-                            '链接形如 http://公网地址:端口/pic_http/xxx.png。需在路由器把该端口转发到本机。',
-                  foreground='#888888', wraplength=720, justify='left').grid(
-            row=2, column=0, columnspan=5, sticky='w', padx=4, pady=(2, 0))
-        img.columnconfigure(1, weight=1)
-
-        # --- MC -> QQ ---
-        mc = ttk.LabelFrame(frm, text='MC → QQ 转述（公屏消息以触发词开头即发送到 QQ）', padding=6)
-        mc.grid(row=11, column=0, columnspan=5, sticky='we', padx=2, pady=(8, 2))
-
+        m2q = ttk.LabelFrame(relay, text='MC → QQ：公屏消息以触发词开头即发送到群', padding=6)
+        m2q.pack(fill='x', pady=(8, 0))
         self.var_mc2qq_enabled = tk.BooleanVar(value=False)
         self.var_mc2qq_trigger = tk.StringVar()
         self.var_mc2qq_group = tk.StringVar()
@@ -990,45 +1517,62 @@ class AiPlayerGUI:
         self.var_mc2qq_cooldown = tk.StringVar()
         self.var_mc2qq_ok = tk.StringVar()
         self.var_mc2qq_fail = tk.StringVar()
+        r = ttk.Frame(m2q)
+        r.pack(fill='x', pady=2)
+        ttk.Checkbutton(r, text='启用 MC → QQ', variable=self.var_mc2qq_enabled).pack(side='left')
+        ttk.Label(r, text='触发词（, 分隔）').pack(side='left', padx=(12, 4))
+        ttk.Entry(r, textvariable=self.var_mc2qq_trigger, width=24).pack(side='left')
+        ttk.Label(r, text='目标群').pack(side='left', padx=(12, 4))
+        ttk.Entry(r, textvariable=self.var_mc2qq_group, width=16).pack(side='left')
+        ttk.Label(r, text='留空=用上方群号第一个；也可 [sentQ:群号] 临时指定',
+                  foreground='#888888').pack(side='left', padx=(6, 0))
+        r = ttk.Frame(m2q)
+        r.pack(fill='x', pady=2)
+        ttk.Label(r, text='消息模板').pack(side='left')
+        ttk.Entry(r, textvariable=self.var_mc2qq_format).pack(
+            side='left', fill='x', expand=True, padx=(4, 8))
+        ttk.Label(r, text='{player} / {message}', foreground='#888888').pack(side='left')
+        r = ttk.Frame(m2q)
+        r.pack(fill='x', pady=2)
+        ttk.Label(r, text='冷却秒').pack(side='left')
+        ttk.Entry(r, textvariable=self.var_mc2qq_cooldown, width=6).pack(side='left', padx=(4, 12))
+        ttk.Label(r, text='成功提示').pack(side='left')
+        ttk.Entry(r, textvariable=self.var_mc2qq_ok, width=20).pack(side='left', padx=(4, 8))
+        ttk.Label(r, text='失败提示').pack(side='left')
+        ttk.Entry(r, textvariable=self.var_mc2qq_fail, width=20).pack(side='left', padx=(4, 0))
 
-        ttk.Checkbutton(mc, text='启用 MC → QQ', variable=self.var_mc2qq_enabled).grid(
-            row=0, column=0, sticky='w', padx=4, pady=3)
-        ttk.Label(mc, text='触发词（, 分隔）').grid(row=0, column=1, sticky='e', padx=4)
-        ttk.Entry(mc, textvariable=self.var_mc2qq_trigger, width=24).grid(
-            row=0, column=2, columnspan=2, sticky='w', padx=4)
+        # ============ 模块 3：账号安全 ============
+        sec = ttk.LabelFrame(parent, text='账号安全（可选）', padding=6)
+        sec.pack(fill='x', pady=(8, 0))
+        self.var_qq_autoreconnect = tk.BooleanVar(value=True)
+        self.var_qq_health = tk.StringVar()
+        self.var_qq_autoconfig = tk.BooleanVar(value=True)
+        r = ttk.Frame(sec)
+        r.pack(fill='x', pady=2)
+        ttk.Checkbutton(r, text='自动重连', variable=self.var_qq_autoreconnect).pack(side='left')
+        ttk.Label(r, text='在线检测秒').pack(side='left', padx=(12, 4))
+        ttk.Entry(r, textvariable=self.var_qq_health, width=6).pack(side='left')
+        ttk.Checkbutton(r, text='自动为新扫码账号写配置（仅 NapCat）',
+                        variable=self.var_qq_autoconfig).pack(side='left', padx=(12, 0))
+        ttk.Label(sec, text='连接因疑似风控被关闭、或在线检测连续失败时，会告警并停止自动重连，避免反复登录加重风控；恢复后点「重连」。',
+                  foreground='#888888', wraplength=780, justify='left').pack(anchor='w', padx=2, pady=(2, 0))
 
-        ttk.Label(mc, text='目标群').grid(row=1, column=0, sticky='w', padx=4, pady=3)
-        ttk.Entry(mc, textvariable=self.var_mc2qq_group, width=18).grid(
-            row=1, column=1, sticky='w', padx=4)
-        ttk.Label(mc, text='留空=用上方群号第一个；也可用 [sentQ:群号] 临时指定',
-                  foreground='#888888').grid(row=1, column=2, columnspan=2, sticky='w', padx=4)
-
-        ttk.Label(mc, text='消息模板').grid(row=2, column=0, sticky='w', padx=4, pady=3)
-        ttk.Entry(mc, textvariable=self.var_mc2qq_format, width=38).grid(
-            row=2, column=1, columnspan=2, sticky='we', padx=4)
-        ttk.Label(mc, text='{player} / {message}', foreground='#888888').grid(
-            row=2, column=3, sticky='w', padx=4)
-
-        ttk.Label(mc, text='冷却秒').grid(row=3, column=0, sticky='w', padx=4, pady=3)
-        ttk.Entry(mc, textvariable=self.var_mc2qq_cooldown, width=6).grid(
-            row=3, column=1, sticky='w', padx=4)
-        ttk.Label(mc, text='发送前自动去掉 MC 颜色码；非法字符以 ? 代替',
-                  foreground='#888888').grid(row=3, column=2, columnspan=2, sticky='w', padx=4)
-
-        ttk.Label(mc, text='成功提示').grid(row=4, column=0, sticky='w', padx=4, pady=3)
-        ttk.Entry(mc, textvariable=self.var_mc2qq_ok, width=38).grid(
-            row=4, column=1, columnspan=2, sticky='we', padx=4)
-        ttk.Label(mc, text='{player}', foreground='#888888').grid(
-            row=4, column=3, sticky='w', padx=4)
-
-        ttk.Label(mc, text='失败提示').grid(row=5, column=0, sticky='w', padx=4, pady=3)
-        ttk.Entry(mc, textvariable=self.var_mc2qq_fail, width=38).grid(
-            row=5, column=1, columnspan=2, sticky='we', padx=4)
-        ttk.Label(mc, text='{player}', foreground='#888888').grid(
-            row=5, column=3, sticky='w', padx=4)
-        mc.columnconfigure(1, weight=1)
-
-        frm.columnconfigure(1, weight=1)
+        # ============ 模块 4：图片转本地链接 ============
+        img = ttk.LabelFrame(parent, text='图片转本地链接（Python HTTP 服务，仅暴露 /pic_http/）', padding=6)
+        img.pack(fill='x', pady=(8, 0))
+        self.var_qq_image_link = tk.BooleanVar(value=False)
+        self.var_qq_img_port = tk.StringVar()
+        self.var_qq_img_base = tk.StringVar()
+        r = ttk.Frame(img)
+        r.pack(fill='x', pady=2)
+        ttk.Checkbutton(r, text='图片转链接', variable=self.var_qq_image_link).pack(side='left')
+        ttk.Label(r, text='监听端口').pack(side='left', padx=(12, 4))
+        ttk.Entry(r, textvariable=self.var_qq_img_port, width=8).pack(side='left')
+        ttk.Label(r, text='公网地址').pack(side='left', padx=(12, 4))
+        ttk.Entry(r, textvariable=self.var_qq_img_base).pack(
+            side='left', fill='x', expand=True, padx=(4, 0))
+        ttk.Label(img, text='留空=自动探测公网 IP，例 http://1.2.3.4:8765；图片存到项目 pic_http/，需在路由器把端口转发到本机。',
+                  foreground='#888888', wraplength=780, justify='left').pack(anchor='w', padx=2, pady=(2, 0))
 
     def _build_roster_frame(self, parent) -> None:
         frm = ttk.LabelFrame(parent,
@@ -1308,6 +1852,7 @@ class AiPlayerGUI:
         self.log_text.tag_configure('private', foreground='#ff9ad8')
         self.log_text.tag_configure('msa', foreground='#b9f6ca')
         self.log_text.tag_configure('qq', foreground='#c792ea')
+        self.log_text.tag_configure('song', foreground='#4dd0e1')
         self.log_text.tag_configure('server', foreground='#90caf9')
 
         bottom = ttk.Frame(tab)
@@ -1336,6 +1881,13 @@ class AiPlayerGUI:
         self.log_text.insert('end', stamp + text + '\n', tag)
         self.log_text.see('end')
         self.log_text.configure(state='disabled')
+        # Backend events are already saved by the controller; only record the
+        # lines the GUI itself originates (settings saved, manual actions...).
+        if not getattr(self, '_from_backend', False):
+            try:
+                self.controller.record_log(text)
+            except Exception:  # noqa: BLE001
+                pass
 
     def _set_connected_state(self, connected: bool):
         if connected:
@@ -1458,11 +2010,7 @@ class AiPlayerGUI:
         self.var_roster_research_interval.set(str(cfg.roster.researchIntervalSeconds))
 
         self.var_qq_enabled.set(cfg.qq.enabled)
-        self.var_qq_mode.set(cfg.qq.mode if cfg.qq.mode in ('forward', 'reverse') else 'forward')
-        self.var_qq_url.set(cfg.qq.url or '')
-        self.var_qq_token.set(cfg.qq.accessToken or '')
-        self.var_qq_listen_host.set(cfg.qq.listenHost or '0.0.0.0')
-        self.var_qq_listen_port.set(str(cfg.qq.listenPort))
+        self.var_qq_to_mc.set(bool(cfg.qq.qqToMcEnabled))
         self.var_qq_groups.set(', '.join(cfg.qq.groups or []))
         self.var_qq_format.set(cfg.qq.format or '')
         self.var_qq_image_link.set(bool(cfg.qq.imageAsLink))
@@ -1470,7 +2018,12 @@ class AiPlayerGUI:
         self.var_qq_img_base.set(cfg.qq.imagePublicBase or '')
         self.var_qq_autoreconnect.set(bool(cfg.qq.autoReconnect))
         self.var_qq_health.set(str(cfg.qq.healthCheckSeconds))
-        self.var_qq_autoconfig.set(bool(cfg.qq.autoConfigNewAccounts))
+        self.var_qq_autoconfig.set(bool(cfg.qq.napcat.autoConfigNewAccounts))
+        # Endpoint fields follow the selected framework (SnowLuma / NapCat each
+        # keep their own path / url / token).
+        self._qq_editing_framework = ('napcat' if cfg.qq.framework == 'napcat' else 'snowluma')
+        self.var_qq_framework.set('NapCat' if cfg.qq.framework == 'napcat' else 'SnowLuma')
+        self._load_qq_endpoint_widgets(self._qq_editing_framework, auto_token=True)
 
         self.var_mc2qq_enabled.set(cfg.qq.mcToQqEnabled)
         self.var_mc2qq_trigger.set(cfg.qq.mcTrigger or '[sentQ]')
@@ -1533,6 +2086,32 @@ class AiPlayerGUI:
             self.bg_darkness_label.config(text=f'{cfg.appearance.backgroundDarkness}%')
         except Exception:  # noqa: BLE001
             pass
+
+        self.var_book_file.set(cfg.docBook.lastFile or '')
+        self.var_book_pagelines.set(str(cfg.docBook.pageLines))
+        self.var_book_perbook.set(str(cfg.docBook.pagesPerBook))
+        self.var_book_start.set(cfg.docBook.startText or '')
+        self.var_book_endtext.set(cfg.docBook.endText or '')
+        self.var_book_enddrop.set(bool(cfg.docBook.endDrop))
+        self.var_book_autoget.set(bool(cfg.docBook.autoGetBook))
+        self.var_book_sign.set(bool(cfg.docBook.signBook))
+        self.var_book_title.set(cfg.docBook.titleTemplate or '')
+
+        self.var_song_trigger.set(cfg.song.trigger or '[点歌]')
+        self.var_song_stop_word.set(cfg.song.stopWord or '停止')
+        self.var_song_reply_enabled.set(bool(cfg.song.replyEnabled))
+        self.var_song_post_play_link.set(bool(cfg.song.postPlayLink))
+        self.var_song_mod_url.set(cfg.song.modUrl or '')
+        self.var_song_reply_text.set(cfg.song.replyText or '')
+        self.var_song_reply_cooldown.set(str(cfg.song.replyCooldownSeconds))
+        self.var_song_netease_cookie.set(cfg.song.neteaseCookie or '')
+        self.var_song_play_text.set(cfg.song.playText or '{player} 点了一首 {music}')
+        self.var_song_instant_play.set(bool(getattr(cfg.song, 'instantPlay', True)))
+        self.var_song_private_play.set(bool(getattr(cfg.song, 'privatePlay', True)))
+        if hasattr(self, '_netease_status'):
+            self._netease_status.set('已登录（会员 Cookie 已保存）'
+                                     if (cfg.song.neteaseCookie or '').strip()
+                                     else '未登录（VIP 歌只能放 45 秒试听）')
 
         self._on_auth_type_changed()
         self._refresh_auth_label()
@@ -1722,11 +2301,12 @@ class AiPlayerGUI:
 
         qq = cfg.qq
         qq.enabled = self.var_qq_enabled.get()
-        qq.mode = self.var_qq_mode.get().strip() or 'forward'
-        qq.url = self.var_qq_url.get().strip() or 'ws://127.0.0.1:3001'
-        qq.accessToken = self.var_qq_token.get().strip()
-        qq.listenHost = self.var_qq_listen_host.get().strip() or '0.0.0.0'
-        qq.listenPort = self._parse_int(self.var_qq_listen_port.get(), 3002)
+        qq.qqToMcEnabled = self.var_qq_to_mc.get()
+        qq.framework = ('napcat' if str(self.var_qq_framework.get()).strip().lower().startswith('nap')
+                        else 'snowluma')
+        # Save the endpoint fields into the framework currently shown in the UI.
+        self._store_qq_endpoint_widgets(getattr(self, '_qq_editing_framework', qq.framework))
+        qq.napcat.autoConfigNewAccounts = self.var_qq_autoconfig.get()
         qq.groups = [x for x in re.split(r'[,，;\s]+', self.var_qq_groups.get()) if x]
         qq.format = self.var_qq_format.get().strip() or '&7&o[{group}][{name}]：{message}'
         qq.imageAsLink = self.var_qq_image_link.get()
@@ -1734,7 +2314,6 @@ class AiPlayerGUI:
         qq.imagePublicBase = self.var_qq_img_base.get().strip()
         qq.autoReconnect = self.var_qq_autoreconnect.get()
         qq.healthCheckSeconds = self._parse_int(self.var_qq_health.get(), 30)
-        qq.autoConfigNewAccounts = self.var_qq_autoconfig.get()
         qq.mcToQqEnabled = self.var_mc2qq_enabled.get()
         qq.mcTrigger = self.var_mc2qq_trigger.get().strip() or '[sentQ]'
         qq.mcTargetGroup = self.var_mc2qq_group.get().strip()
@@ -1777,6 +2356,33 @@ class AiPlayerGUI:
         ap.backgroundDarkness = int(self.var_bg_darkness.get())
         ap.textTheme = _THEME_LABEL_TO_VALUE.get(self.var_text_theme.get(), 'auto')
         ap.validate()
+
+        db = cfg.docBook
+        db.pageChars = docbook.MAX_PAGE_CHARS
+        db.pageLines = self._parse_int(self.var_book_pagelines.get(), 14)
+        db.pagesPerBook = self._parse_int(self.var_book_perbook.get(), 100)
+        db.startText = self.var_book_start.get().strip()
+        db.endText = self.var_book_endtext.get().strip()
+        db.endDrop = bool(self.var_book_enddrop.get())
+        db.autoGetBook = bool(self.var_book_autoget.get())
+        db.signBook = bool(self.var_book_sign.get())
+        db.titleTemplate = self.var_book_title.get().strip()
+        db.lastFile = self.var_book_file.get().strip()
+        db.validate()
+
+        song = cfg.song
+        song.trigger = self.var_song_trigger.get().strip() or '[点歌]'
+        song.stopWord = self.var_song_stop_word.get().strip() or '停止'
+        song.replyEnabled = bool(self.var_song_reply_enabled.get())
+        song.postPlayLink = bool(self.var_song_post_play_link.get())
+        song.modUrl = self.var_song_mod_url.get().strip()
+        song.replyText = self.var_song_reply_text.get().strip()
+        song.replyCooldownSeconds = self._parse_int(self.var_song_reply_cooldown.get(), 20)
+        song.neteaseCookie = self.var_song_netease_cookie.get().strip()
+        song.playText = self.var_song_play_text.get().strip() or '{player} 点了一首 {music}'
+        song.instantPlay = bool(self.var_song_instant_play.get())
+        song.privatePlay = bool(self.var_song_private_play.get())
+        song.validate()
 
         cfg.save()
         ai.save()
@@ -1847,15 +2453,94 @@ class AiPlayerGUI:
         self._append_log(f'{which} {"已启用" if enabled else "已禁用"}。', 'info')
 
     def _on_qq_enabled(self):
-        self._gather_config()
-        self.controller.set_qq_enabled(self.var_qq_enabled.get())
+        enabled = bool(self.var_qq_enabled.get())
+        try:
+            self._gather_config()
+        except Exception as e:  # noqa: BLE001
+            self._append_log('保存设置出错（已忽略，仍切换 QQ）: ' + str(e), 'warn')
+        self.controller.set_qq_enabled(enabled)
+        self._append_log('QQ 转述已' + ('启用' if enabled else '禁用') + '。', 'info')
 
-    def _on_qq_launch_napcat(self):
+    def _on_qq_to_mc(self):
+        try:
+            self._gather_config()
+        except Exception as e:  # noqa: BLE001
+            self._append_log('保存设置出错: ' + str(e), 'warn')
+        on = bool(self.var_qq_to_mc.get())
+        self._append_log('QQ → MC 已' + ('启用' if on else '禁用')
+                         + '（不会断开 QQ 连接，MC → QQ 不受影响）。', 'info')
+
+    def _load_qq_endpoint_widgets(self, fw: str, auto_token: bool = False) -> None:
+        """Show the given framework's endpoint settings in the widgets."""
+        qq = self.controller.config.qq
+        ep = qq.napcat if fw == 'napcat' else qq.snowluma
+        self.var_qq_mode.set(ep.mode if ep.mode in ('forward', 'reverse') else 'forward')
+        url = ep.url or ''
+        token = ep.accessToken or ''
+        # SnowLuma: prefer the live port/token from its config (per account), so
+        # switching accounts never leaves a stale token that answers 401.
+        if fw == 'snowluma':
+            try:
+                det = self.controller.snowluma_ws_auth()
+            except Exception:  # noqa: BLE001
+                det = None
+            if det:
+                host, port, det_token = det
+                if det_token:
+                    token = det_token
+                if (auto_token or not url.strip()):
+                    url = url.strip() or f'ws://{host}:{port}'
+        self.var_qq_url.set(url)
+        self.var_qq_token.set(token)
+        self.var_qq_listen_host.set(ep.listenHost or '0.0.0.0')
+        self.var_qq_listen_port.set(str(ep.listenPort))
+        self.var_qq_launcher.set(ep.launcherPath or '')
+        try:
+            self.qq_launcher_label.config(
+                text='启动路径（SnowLuma 目录）' if fw == 'snowluma'
+                else '启动路径（NapCat 目录）')
+        except Exception:  # noqa: BLE001
+            pass
+
+    def _store_qq_endpoint_widgets(self, fw: str) -> None:
+        """Save the widgets into the given framework's endpoint section."""
+        qq = self.controller.config.qq
+        ep = qq.napcat if fw == 'napcat' else qq.snowluma
+        ep.mode = self.var_qq_mode.get().strip() or 'forward'
+        ep.url = self.var_qq_url.get().strip()
+        ep.accessToken = self.var_qq_token.get().strip()
+        ep.listenHost = self.var_qq_listen_host.get().strip() or '0.0.0.0'
+        ep.listenPort = self._parse_int(self.var_qq_listen_port.get(), 3002)
+        ep.launcherPath = self.var_qq_launcher.get().strip()
+        ep.validate()
+
+    def _on_qq_framework_changed(self):
+        # Persist the current framework's edits, then show the new one's values.
+        self._store_qq_endpoint_widgets(getattr(self, '_qq_editing_framework', 'snowluma'))
+        fw = ('napcat' if str(self.var_qq_framework.get()).strip().lower().startswith('nap')
+              else 'snowluma')
+        self._qq_editing_framework = fw
+        self.controller.config.qq.framework = fw
+        self._load_qq_endpoint_widgets(fw)
+        try:
+            self.controller.config.save()
+        except Exception:  # noqa: BLE001
+            pass
+        self._append_log(
+            f'QQ 框架已切换为 {self.var_qq_framework.get()}（该框架的路径/地址/Token 独立保存）。', 'info')
+
+    def _on_qq_launch_framework(self):
         self._gather_config()
-        self.controller.start_napcat()
+        self.controller.start_qq_framework()
 
     def _on_qq_quick_login(self):
         self._gather_config()
+        if self.controller.config.qq.framework != 'napcat':
+            messagebox.showinfo(
+                'aafm',
+                '当前启动框架为 SnowLuma，不需要「快速登录」。\n'
+                '请在 SnowLuma 的 WebUI 里完成 QQ 登录与 OneBot 连接配置。')
+            return
         choices = self.controller.qq_account_choices()  # [(uin, label), ...]
         labels = [label for _, label in choices]
         last = (self.controller.config.qq.lastLoginUin or '').strip()
@@ -1922,16 +2607,24 @@ class AiPlayerGUI:
             pass
 
     def _on_qq_start(self):
+        self.var_qq_enabled.set(True)
         self._gather_config()
         self.controller.start_qq()
         self._append_log('正在连接 QQ 网关…', 'info')
 
     def _on_qq_reconnect(self):
+        self.var_qq_enabled.set(True)
         self._gather_config()
         self.controller.restart_qq()
         self._append_log('正在重连 QQ 网关…', 'info')
 
     def _on_qq_stop(self):
+        self.var_qq_enabled.set(False)
+        try:
+            self.controller.config.qq.enabled = False
+            self.controller.config.save()
+        except Exception:  # noqa: BLE001
+            pass
         self.controller.stop_qq()
         self._append_log('已断开 QQ 转述。', 'info')
 
@@ -2083,8 +2776,12 @@ class AiPlayerGUI:
     # ------------------------------------------------------------------
     def _poll_ui(self):
         self._tick += 1
-        for ev in self.controller.drain_ui():
-            self._handle_ui_event(ev)
+        self._from_backend = True
+        try:
+            for ev in self.controller.drain_ui():
+                self._handle_ui_event(ev)
+        finally:
+            self._from_backend = False
         if self._relogin_pending:
             self._check_relogin_progress()
         # Periodically refresh the LittleSkin login status (file may appear any time)
@@ -2145,11 +2842,19 @@ class AiPlayerGUI:
         elif kind == 'reloginNeeded':
             self._append_log(f'LittleSkin 登录失效: {ev.get("message", "")}', 'error')
             self._start_relogin()
+        elif kind == 'bookProgress':
+            try:
+                self.book_progress_label.config(
+                    text=f'进度：已写到第 {ev.get("nextPage", 0)}/{ev.get("totalPages", 0)} 页，'
+                         f'下一本第 {ev.get("nextBook", 1)} 本（本次 {ev.get("done", 0)}/{ev.get("total", 0)} 本）')
+            except Exception:  # noqa: BLE001
+                pass
 
     @staticmethod
     def _log_tag(level):
         return {'error': 'error', 'ai': 'ai', 'quiz': 'quiz', 'sent': 'sent',
-                'warn': 'warn', 'msa': 'msa', 'qq': 'qq', 'server': 'server'}.get(level, 'info')
+                'warn': 'warn', 'msa': 'msa', 'qq': 'qq', 'song': 'song',
+                'server': 'server'}.get(level, 'info')
 
     @staticmethod
     def _parse_int(s, default):

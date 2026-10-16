@@ -114,6 +114,7 @@ let healthTimer = null;
 let healthBusy = false;
 
 const groupNames = new Map();
+const ignoredGroups = new Set();
 let stopped = false;
 const activeMode = mode;
 let reconnectTimer = null;
@@ -386,11 +387,27 @@ async function handleObj(obj) {
     if (obj.post_type !== 'message' || obj.message_type !== 'group') return;
 
     const groupId = String(obj.group_id);
-    if (groupFilter.size && !groupFilter.has(groupId)) return;
+    // Diagnostic: show every received group message so it is obvious whether
+    // events arrive, then whether the filter / content / MC step drops them.
+    log('info', `收到群消息 [${groupId}] ${sanitizeText(senderName(obj))}: `
+        + sanitizeText(obj.raw_message || '').slice(0, 80));
+    if (groupFilter.size && !groupFilter.has(groupId)) {
+        // Tell the user once per group when a message is dropped by the filter,
+        // so a wrong 「群号」 is obvious instead of a silent no-op.
+        if (!ignoredGroups.has(groupId)) {
+            ignoredGroups.add(groupId);
+            log('info', `群 ${groupId} 不在转述名单（当前只转述: `
+                + Array.from(groupFilter).join(', ') + '），已忽略它的消息。');
+        }
+        return;
+    }
 
     const message = obj.message != null ? obj.message : obj.raw_message;
     const content = extractText(message);
-    if (!content) return;
+    if (!content) {
+        log('info', `群 ${groupId} 的消息没有可转述的文本内容（纯图片/卡片等），已跳过。`);
+        return;
+    }
 
     let images = [];
     if (Array.isArray(message) && (config.imageAsLink || config.collectImages)) {
@@ -584,6 +601,7 @@ function handleCommand(cmd) {
             groupFilter = new Set((Array.isArray(cmd.groups) ? cmd.groups : [])
                 .map((g) => String(g == null ? '' : g).trim())
                 .filter(Boolean));
+            ignoredGroups.clear();
             log('info', 'QQ 群过滤已更新：' + (groupFilter.size ? Array.from(groupFilter).join(', ') : '全部群'));
             break;
         case 'ping':

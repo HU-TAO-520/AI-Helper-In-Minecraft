@@ -126,8 +126,14 @@ class QqEngine:
             try:
                 self.proc.wait(timeout=3)
             except Exception:  # noqa: BLE001
-                try:
-                    self.proc.terminate()
-                except Exception:  # noqa: BLE001
-                    pass
+                for killer in ('terminate', 'kill'):
+                    try:
+                        getattr(self.proc, killer)()
+                    except Exception:  # noqa: BLE001
+                        pass
+                    try:
+                        self.proc.wait(timeout=2)
+                        break
+                    except Exception:  # noqa: BLE001
+                        continue
         self._running = False

@@ -63,6 +63,17 @@ const rolesEndpoint = `${LS.site}/api/yggdrasil/sessionserver/session/minecraft/
 const mctokenEndpoint = `${LS.site}/api/yggdrasil/authserver/oauth`;
 const redirectUri = `http://localhost:${LS.redirectPort}/auth`;
 
+// 外置登录各 HTTP 请求的硬超时（毫秒），可用环境变量 AAFM_AUTH_TIMEOUT_MS 覆盖。
+const AUTH_TIMEOUT_MS = parseInt(process.env.AAFM_AUTH_TIMEOUT_MS || '20000', 10) || 20000;
+function authSignal() {
+    try {
+        return (typeof AbortSignal !== 'undefined' && typeof AbortSignal.timeout === 'function')
+            ? AbortSignal.timeout(AUTH_TIMEOUT_MS) : undefined;
+    } catch (e) {
+        return undefined;
+    }
+}
+
 const ARGS = process.argv.slice(2);
 const RELOGIN = ARGS.includes('relogin') || ARGS.includes('--relogin');
 const FORCE = ARGS.includes('force') || ARGS.includes('--force');
@@ -94,7 +105,8 @@ async function refreshSession(refreshToken) {
             'Accept': 'application/json',
             'Content-Type': 'application/x-www-form-urlencoded'
         },
-        body: requestBody.toString()
+        body: requestBody.toString(),
+        signal: authSignal()
     });
     if (!response.ok) throw new Error(`Token refresh HTTP ${response.status}`);
     return await response.json();
@@ -126,7 +138,8 @@ async function fetchMcToken(accessToken, selectedUuid) {
     const response = await fetch(mctokenEndpoint, {
         method: 'POST',
         headers,
-        body: JSON.stringify({ "uuid": selectedUuid })
+        body: JSON.stringify({ "uuid": selectedUuid }),
+        signal: authSignal()
     });
     if (!response.ok) throw new Error(`Failed to obtain MC token: HTTP ${response.status}`);
     return await response.json();
@@ -138,7 +151,7 @@ async function fetchRoles(accessToken) {
     let retries = 0;
     while (retries < 3) {
         try {
-            const response = await fetch(rolesEndpoint, { headers, timeout: 5000 });
+            const response = await fetch(rolesEndpoint, { headers, signal: authSignal() });
             if (!response.ok) throw new Error(`Failed to fetch roles: ${response.status}`);
             const roles = await response.json();
             if (JSON.stringify(roles).indexOf('"error":') !== -1) throw new Error('No response from Roles API');
@@ -216,7 +229,8 @@ async function runOAuth() {
             response = await fetch(tokenEndpoint, {
                 method: 'POST',
                 headers: { 'Accept': 'application/json', 'Content-Type': 'application/x-www-form-urlencoded' },
-                body: requestBody.toString()
+                body: requestBody.toString(),
+                signal: authSignal()
             });
             if (!response.ok) throw new Error(`Token request HTTP ${response.status}`);
         } catch (e) {

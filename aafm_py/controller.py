@@ -1,10 +1,12 @@
 """Controller tying the bot engine, AI player and UI together."""
 from __future__ import annotations
 
+import base64
 import json
 import os
 import queue
 import re
+import socket
 import subprocess
 import threading
 import time
@@ -12,8 +14,11 @@ import urllib.parse
 from typing import Any, Dict, List, Optional
 
 from .ai_player import AiPlayer
+from . import docbook
 from .bot_engine import BotEngine, BASE_DIR
-from .config import (AiPlayerConfig, AppConfig, DEFAULT_BASE_URLS, load_auth_profile)
+from .config import (AiPlayerConfig, AppConfig, BOOK_PROGRESS_FILE,
+                     DEFAULT_BASE_URLS, load_auth_profile)
+from .log_saver import LogSaver
 from .photo_server import PhotoServer, save_image_bytes
 from .qq_engine import QqEngine
 from .roster import Roster, RosterError
@@ -49,9 +54,10 @@ AUTH_FAIL_HINTS = (
 
 
 def _qq_mode_label(qq) -> str:
-    if qq.mode == 'reverse':
-        return f'反向监听 {qq.listenHost}:{qq.listenPort}'
-    return f'正向连接 {qq.url}'
+    ep = qq.active() if hasattr(qq, 'active') else qq
+    if ep.mode == 'reverse':
+        return f'反向监听 {ep.listenHost}:{ep.listenPort}'
+    return f'正向连接 {ep.url}'
 
 
 def _resolve_llm_endpoint(provider: str, base: str) -> str:
@@ -100,6 +106,15 @@ def _is_auth_failure(text: str) -> bool:
     return False
 
 
+# 机器人自己发到公屏的播放数据里一定有音频直链；带直链的消息一律不再当成新点歌（防自触发死循环）。
+_AUDIO_URL_RE = re.compile(r'https?://\S*(?:music\.126\.net|\.mp3|\.m4a|\.flac)', re.I)
+
+# 直链混淆：公屏的链接过滤会把 http(s):// 整条替换成「[链接]」，所以机器人把直链
+# ①去掉 query ②去掉协议头（¤=http、¥=https）③把 . / : 换成安全字符，客户端 Mod 还原。
+URL_MARK_HTTP = '¤'
+URL_MARK_HTTPS = '¥'
+
+
 class Controller:
     def __init__(self) -> None:
         self.config: AppConfig = AppConfig.load()
@@ -118,12 +133,26 @@ class Controller:
         self._qq_connected = False
         self._qq_last_state: Optional[str] = None
         self._qq_pending_relays: List[str] = []
+        self._qq_relay_warn_at = 0.0
+        self._snowluma_uin = ''
         self._last_mc_to_qq_time = 0.0
         self._last_health_alert = 0.0
+        self._song_reply_at: Dict[str, float] = {}
+        self._song_posted_at: Dict[str, float] = {}
+        # 最近发过的歌：key -> (时间, 队列条目快照)。同一首歌又被点时直接复用，**不再搜一遍**
+        # （链接里带的 id: 还能让 Mod 自己兜底重取）。
+        self._song_recent: Dict[str, Any] = {}
+        # 点歌播放队列（机器人真队列：按歌长依次播放）
+        self._song_queue: List[Dict[str, Any]] = []
+        self._song_current: Optional[Dict[str, Any]] = None
+        self._song_next_at = 0.0
+        self._song_seq = 0
         self._qq_nicknames: Dict[str, str] = {}
         self._load_qq_accounts()
         self._photo = PhotoServer()
         self._public_base_cache = ''
+
+        self.log_saver = LogSaver(BASE_DIR)
 
         self._worker: Optional[threading.Thread] = None
         self._running = False
@@ -139,6 +168,10 @@ class Controller:
         self._keep_retry_deadline: Optional[float] = None
         self._kick_lobby_pending = False
         self._lobby_at: Optional[float] = None
+        # 外置登录 / 网络服务异常时进入退避重试（避免刷屏 + 打风暴）。
+        self._service_outage: Optional[str] = None
+        self._service_error_count = 0
+        self._last_service_error_log = 0.0
         self._proactive_at: Optional[float] = None
         self._auto_lobby_at: Optional[float] = None
         self._online_next_check: Optional[float] = None
@@ -146,6 +179,18 @@ class Controller:
 
         self.check_updates_async()
         threading.Thread(target=self._napcat_config_loop, daemon=True).start()
+        threading.Thread(target=self._log_save_loop, daemon=True).start()
+
+    # ------------------------------------------------------------------
+    # Log persistence loop (daily rollover)
+    # ------------------------------------------------------------------
+    def _log_save_loop(self) -> None:
+        while True:
+            try:
+                self.tick_log_save()
+            except Exception:  # noqa: BLE001
+                pass
+            time.sleep(30)
 
     # ------------------------------------------------------------------
     # Auto-configure OneBot network for newly scanned QQ accounts
@@ -154,15 +199,17 @@ class Controller:
         # First pass shortly after startup, then poll for new accounts.
         while True:
             try:
-                if self.config.qq.autoConfigNewAccounts:
+                # Auto-writing the OneBot config only applies to NapCat; SnowLuma
+                # is configured through its own WebUI.
+                if self.config.qq.napcat.autoConfigNewAccounts and self.config.qq.framework == 'napcat':
                     self._ensure_napcat_configs()
             except Exception:  # noqa: BLE001
                 pass
             time.sleep(5)
 
     def _desired_network(self):
-        """Build the WS server/client entry from the current QQ settings."""
-        cfg = self.config.qq
+        """Build the WS server/client entry from the NapCat settings."""
+        cfg = self.config.qq.napcat
         if cfg.mode == 'reverse':
             host = cfg.listenHost or '0.0.0.0'
             if host in ('0.0.0.0', '::'):
@@ -207,7 +254,7 @@ class Controller:
         return server, None
 
     def _ensure_napcat_configs(self) -> None:
-        d = NAPCAT_CONFIG_DIR
+        d = self._napcat_config_dir()
         if not os.path.isdir(d):
             return
         uins = set()
@@ -390,6 +437,10 @@ class Controller:
         """Full stop used on app close: MC connection plus the QQ relay."""
         self.disconnect()
         self._stop_qq()
+        try:
+            self.log_saver.flush()
+        except Exception:  # noqa: BLE001
+            pass
 
     # ------------------------------------------------------------------
     # Auto reconnect / kick handling
@@ -415,7 +466,12 @@ class Controller:
                            'message': f'已连续重连 {self._reconnect_attempts} 次仍未成功，停止重连。'})
             return
         self._reconnect_attempts += 1
-        delay = max(0, cfg.delaySeconds)
+        if self._service_outage is not None:
+            # 外置登录 / 网络服务异常：指数退避（最高 15 分钟），避免反复打风暴。
+            base = max(1, int(cfg.delaySeconds or 0) or 1)
+            delay = min(900, base * (2 ** min(self._reconnect_attempts - 1, 7)))
+        else:
+            delay = max(0, cfg.delaySeconds)
         self._reconnect_at = time.time() + delay
         if kicked and cfg.kickLobbyEnabled:
             self._kick_lobby_pending = True
@@ -424,10 +480,15 @@ class Controller:
         self._post_ui({'kind': 'reconnect', 'state': 'scheduled',
                        'attempt': self._reconnect_attempts, 'max': max_attempts,
                        'delay': delay})
-        suffix = '，持续重连中…' if keep and self._reconnect_attempts >= max_attempts else '…'
-        self._post_ui({'kind': 'log', 'level': 'warn',
-                       'message': f'检测到{"被踢出" if kicked else "非主动断线"}，'
-                                  f'{delay}s 后自动重连（第 {self._reconnect_attempts} 次）{suffix}'})
+        if self._service_outage is not None:
+            self._post_ui({'kind': 'log', 'level': 'warn',
+                           'message': f'外置登录/网络服务异常，{delay}s 后重试'
+                                      f'（第 {self._reconnect_attempts} 次，退避中）…'})
+        else:
+            suffix = '，持续重连中…' if keep and self._reconnect_attempts >= max_attempts else '…'
+            self._post_ui({'kind': 'log', 'level': 'warn',
+                           'message': f'检测到{"被踢出" if kicked else "非主动断线"}，'
+                                      f'{delay}s 后自动重连（第 {self._reconnect_attempts} 次）{suffix}'})
 
     def _can_keep_retrying(self, cfg) -> bool:
         if not getattr(cfg, 'keepRetrying', False):
@@ -571,6 +632,168 @@ class Controller:
             self._post_ui({'kind': 'log', 'level': 'error',
                            'message': '无法发送（未连接）。'})
 
+    # ------------------------------------------------------------------
+    # Document -> book and quill (with progress + stop/pause/continue)
+    # ------------------------------------------------------------------
+    def _settings_from_config(self) -> Dict[str, Any]:
+        db = self.config.docBook
+        return {
+            # Pagination is line-driven; the char count is only the game's hard
+            # limit (1024), so a small leftover value can never shorten pages.
+            'pageChars': int(docbook.MAX_PAGE_CHARS),
+            'pageLines': int(db.pageLines),
+            'pagesPerBook': int(db.pagesPerBook),
+            'signBook': bool(db.signBook),
+            'titleTemplate': str(db.titleTemplate or ''),
+            'startText': str(db.startText or ''),
+            'endText': str(db.endText or ''),
+            'endDrop': bool(db.endDrop),
+            'autoGetBook': bool(db.autoGetBook),
+        }
+
+    def load_book_progress(self) -> Dict[str, Any]:
+        try:
+            with open(BOOK_PROGRESS_FILE, 'r', encoding='utf-8') as f:
+                data = json.load(f)
+            return data if isinstance(data, dict) else {}
+        except Exception:  # noqa: BLE001
+            return {}
+
+    def save_book_progress(self, **fields) -> None:
+        data = self.load_book_progress()
+        data.update(fields)
+        try:
+            with open(BOOK_PROGRESS_FILE, 'w', encoding='utf-8') as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+        except Exception:  # noqa: BLE001
+            pass
+
+    def clear_book_progress(self) -> None:
+        try:
+            os.remove(BOOK_PROGRESS_FILE)
+        except OSError:
+            pass
+
+    def _send_book_write(self, pages, settings, doc_file, start_page, book_start) -> bool:
+        pages = [str(p) for p in (pages or [])]
+        if not pages:
+            self._post_ui({'kind': 'log', 'level': 'error',
+                           'message': '[书与笔] 没有可写入的内容。'})
+            return False
+        if not self._engine.running:
+            self._post_ui({'kind': 'log', 'level': 'error',
+                           'message': '[书与笔] 未连接服务器，无法写入。'})
+            return False
+        self.save_book_progress(
+            file=doc_file, settings=settings, pagesPerBook=int(settings.get('pagesPerBook', 100)),
+            nextPage=int(start_page), nextBook=int(book_start), totalPages=len(pages),
+            updated=time.strftime('%Y-%m-%d %H:%M:%S'))
+        ok = self._engine.write_book(
+            pages,
+            start_text=settings.get('startText', ''),
+            end_text=settings.get('endText', ''),
+            end_drop=bool(settings.get('endDrop', False)),
+            auto_get_book=bool(settings.get('autoGetBook', True)),
+            pages_per_book=int(settings.get('pagesPerBook', 100)),
+            start_page=int(start_page), book_start=int(book_start),
+            sign_book=bool(settings.get('signBook', False)),
+            title_template=settings.get('titleTemplate', ''))
+        if not ok:
+            self._post_ui({'kind': 'log', 'level': 'error',
+                           'message': '[书与笔] 指令发送失败（引擎未就绪）。'})
+        return ok
+
+    def write_book_from_file(self, doc_file: str, pages, settings, start_page: int = 0,
+                             book_start: int = 1) -> bool:
+        """Start writing a document (used for both 写入/重新写入)."""
+        return self._send_book_write(pages, settings, doc_file, start_page, book_start)
+
+    def _pages_from_progress(self, prog: Dict[str, Any]):
+        path = str(prog.get('file') or '')
+        if not path or not os.path.exists(path):
+            self._post_ui({'kind': 'log', 'level': 'error',
+                           'message': '[书与笔] 找不到上次的文档，无法继续。'})
+            return None, None, None
+        settings = prog.get('settings') or self._settings_from_config()
+        try:
+            pages = docbook.load_pages(
+                path,
+                max_chars=docbook.MAX_PAGE_CHARS,
+                max_lines=int(settings.get('pageLines', 14)))
+        except Exception as e:  # noqa: BLE001
+            self._post_ui({'kind': 'log', 'level': 'error',
+                           'message': '[书与笔] 重新读取文档失败：' + str(e)})
+            return None, None, None
+        return path, pages, settings
+
+    def continue_book(self) -> bool:
+        """继续上次未写完的文档（从未写入的地方开始）。"""
+        prog = self.load_book_progress()
+        if not prog:
+            self._post_ui({'kind': 'log', 'level': 'warn', 'message': '[书与笔] 没有可继续的进度。'})
+            return False
+        path, pages, settings = self._pages_from_progress(prog)
+        if pages is None:
+            return False
+        start_page = max(0, int(prog.get('nextPage', 0)))
+        book_start = max(1, int(prog.get('nextBook', 1)))
+        if start_page >= len(pages):
+            self._post_ui({'kind': 'log', 'level': 'info', 'message': '[书与笔] 上次已全部写完。'})
+            return False
+        self._post_ui({'kind': 'log', 'level': 'info',
+                       'message': f'[书与笔] 从第 {start_page + 1} 页继续写入（第 {book_start} 本起）。'})
+        return self._send_book_write(pages, settings, path, start_page, book_start)
+
+    def rewrite_book(self) -> bool:
+        """从第一页重新写入。"""
+        prog = self.load_book_progress()
+        if not prog:
+            self._post_ui({'kind': 'log', 'level': 'warn', 'message': '[书与笔] 没有可重新写入的进度。'})
+            return False
+        path, pages, settings = self._pages_from_progress(prog)
+        if pages is None:
+            return False
+        self._post_ui({'kind': 'log', 'level': 'info', 'message': '[书与笔] 从第一页重新写入。'})
+        return self._send_book_write(pages, settings, path, 0, 1)
+
+    def pause_book(self, action: str = 'pause') -> bool:
+        if not self._engine.running:
+            self._post_ui({'kind': 'log', 'level': 'error', 'message': '[书与笔] 未连接服务器。'})
+            return False
+        ok = self._engine.book_control(action)
+        self._post_ui({'kind': 'log', 'level': 'info',
+                       'message': '[书与笔] 已请求' + ('暂停' if action == 'pause' else '停止')
+                                  + '，将在当前这本写完后停下。'})
+        return ok
+
+    def write_book(self, pages, start_text: str = '', end_text: str = '',
+                   end_drop: bool = False, auto_get_book: bool = True,
+                   pages_per_book: int = 100, start_page: int = 0,
+                   book_start: int = 1, sign_book: bool = False,
+                   title_template: str = '', doc_file: str = '') -> bool:
+        settings = self._settings_from_config()
+        settings.update({
+            'startText': start_text or settings['startText'],
+            'endText': end_text or settings['endText'],
+            'endDrop': bool(end_drop),
+            'autoGetBook': bool(auto_get_book),
+            'pagesPerBook': int(pages_per_book or 100),
+            'signBook': bool(sign_book),
+            'titleTemplate': str(title_template or ''),
+        })
+        return self._send_book_write(pages, settings, doc_file, start_page, book_start)
+
+    def clear_book(self) -> bool:
+        if not self._engine.running:
+            self._post_ui({'kind': 'log', 'level': 'error',
+                           'message': '[书与笔] 未连接服务器，无法清空。'})
+            return False
+        ok = self._engine.clear_book()
+        if not ok:
+            self._post_ui({'kind': 'log', 'level': 'error',
+                           'message': '[书与笔] 清空指令发送失败（引擎未就绪）。'})
+        return ok
+
     def reload_ai_player(self) -> None:
         self.ai_config = AiPlayerConfig.load()
         if self.ai_player:
@@ -628,22 +851,218 @@ class Controller:
     def qq_running(self) -> bool:
         return self._qq.running
 
+    def _detect_running_snowluma_dir(self) -> str:
+        """Find the directory of the currently running SnowLuma process.
+
+        SnowLuma's full Windows package ships its own ``node.exe`` next to
+        ``index.mjs``, so we look for that; on Linux we read ``/proc``. This makes
+        the connection work on any machine regardless of the configured path.
+        Cached for a few seconds.
+        """
+        now = time.time()
+        cached = getattr(self, '_snowluma_detected', None)
+        if cached is not None and now - getattr(self, '_snowluma_detect_at', 0) < 5:
+            return cached
+        found = ''
+        try:
+            for _attempt in range(2):
+                paths = []
+                if os.name == 'nt':
+                    kwargs = {}
+                    if hasattr(subprocess, 'CREATE_NO_WINDOW'):
+                        kwargs['creationflags'] = subprocess.CREATE_NO_WINDOW
+                    out = subprocess.run(
+                        ['powershell', '-NoProfile', '-Command',
+                         "Get-CimInstance Win32_Process -Filter \"Name='node.exe'\" | "
+                         "Select-Object -ExpandProperty ExecutablePath"],
+                        capture_output=True, text=True, timeout=8, **kwargs)
+                    paths = [ln.strip() for ln in (out.stdout or '').splitlines() if ln.strip()]
+                else:
+                    for pid in os.listdir('/proc'):
+                        if not pid.isdigit():
+                            continue
+                        try:
+                            with open(f'/proc/{pid}/cmdline', 'rb') as f:
+                                cmd = f.read().decode('utf-8', 'ignore')
+                        except OSError:
+                            continue
+                        if 'index.mjs' in cmd:
+                            try:
+                                paths.append(os.path.join(os.readlink(f'/proc/{pid}/cwd'), 'node'))
+                            except OSError:
+                                pass
+                for p in paths:
+                    d = os.path.dirname(p)
+                    if os.path.isfile(os.path.join(d, 'index.mjs')):
+                        found = d
+                        break
+                if found:
+                    break
+        except Exception:  # noqa: BLE001
+            found = ''
+        if found:
+            self._snowluma_detected = found
+            self._snowluma_detect_at = now
+        return found
+
+    def _snowluma_config_dir(self) -> str:
+        bases = []
+        p = (self.config.qq.snowluma.launcherPath or '').strip()
+        if p:
+            bases.append(p)
+        detected = self._detect_running_snowluma_dir()
+        if detected:
+            bases.append(detected)
+        bases.append(os.path.join(BASE_DIR, 'SnowLuma'))
+        for base in bases:
+            cfg = os.path.join(base, 'config')
+            if os.path.isdir(cfg):
+                return cfg
+        return os.path.join(bases[0], 'config')
+
+    def _snowluma_candidates(self):
+        """All (uin, host, port, token) from SnowLuma's onebot_*.json, best first.
+
+        SnowLuma can leave a stale token in the file after a restart, so callers
+        should probe the candidates and use the one that actually handshakes.
+        """
+        cfg_dir = self._snowluma_config_dir()
+        if not os.path.isdir(cfg_dir):
+            return []
+        try:
+            names = [n for n in os.listdir(cfg_dir)
+                     if n.startswith('onebot_') and n.endswith('.json')]
+        except OSError:
+            return []
+        last = (self.config.qq.lastLoginUin or '').strip()
+
+        def _mtime(name):
+            try:
+                return os.path.getmtime(os.path.join(cfg_dir, name))
+            except OSError:
+                return 0.0
+
+        def _rank(name):
+            uin = name[len('onebot_'):-len('.json')]
+            return (0 if (last and uin == last) else 1, -_mtime(name))
+
+        out = []
+        for name in sorted(names, key=_rank):
+            try:
+                with open(os.path.join(cfg_dir, name), 'r', encoding='utf-8') as f:
+                    data = json.load(f)
+            except Exception:  # noqa: BLE001
+                continue
+            servers = ((data.get('networks') or {}).get('wsServers') or [])
+            if not servers:
+                continue
+            s = servers[0]
+            try:
+                port = int(s.get('port') or 3001)
+            except (TypeError, ValueError):
+                port = 3001
+            out.append({
+                'uin': name[len('onebot_'):-len('.json')],
+                'host': str(s.get('host') or '127.0.0.1'),
+                'port': port,
+                'token': str(s.get('accessToken') or ''),
+            })
+        return out
+
+    def _probe_ws_token(self, host: str, port: int, token: str,
+                        timeout: float = 1.5):
+        """Return True if a WebSocket handshake to host:port with token succeeds.
+
+        SnowLuma answers ``401`` for a wrong token without upgrading; a correct
+        token gets ``101 Switching Protocols``. Pure stdlib (raw socket).
+        """
+        query = ('?access_token=' + urllib.parse.quote(token, safe='')) if token else ''
+        key = base64.b64encode(os.urandom(16)).decode('ascii')
+        req = (f'GET /{query} HTTP/1.1\r\n'
+               f'Host: {host}:{port}\r\n'
+               'Upgrade: websocket\r\nConnection: Upgrade\r\n'
+               f'Sec-WebSocket-Key: {key}\r\nSec-WebSocket-Version: 13\r\n\r\n')
+        try:
+            sock = socket.create_connection((host, int(port)), timeout=timeout)
+        except OSError:
+            return None
+        try:
+            sock.sendall(req.encode('ascii'))
+            data = sock.recv(64)
+        except OSError:
+            return None
+        finally:
+            try:
+                sock.close()
+            except OSError:
+                pass
+        return data.startswith(b'HTTP/1.1 101') or data.startswith(b'HTTP/1.0 101')
+
+    def snowluma_ws_auth(self):
+        """(host, port, accessToken) that actually works with the running SnowLuma.
+
+        Reads ``<launcherPath>/config/onebot_*.json`` candidates (preferring the
+        last-logged-in UIN, then the most recently modified file), then **probes**
+        each token with a real WebSocket handshake so a stale token left behind by
+        a SnowLuma restart never causes a 401. The chosen UIN goes to
+        ``self._snowluma_uin``.
+        """
+        self._snowluma_uin = ''
+        cands = self._snowluma_candidates()
+        if not cands:
+            return None
+        for c in cands:
+            if self._probe_ws_token(c['host'], c['port'], c['token']):
+                self._snowluma_uin = c['uin']
+                return (c['host'], c['port'], c['token'])
+        # Server not reachable / no token handshook: return the best guess.
+        c = cands[0]
+        self._snowluma_uin = c['uin']
+        return (c['host'], c['port'], c['token'])
+
     def _build_qq_runtime_config(self) -> Dict[str, Any]:
-        cfg = self.config.qq
+        qq = self.config.qq
+        ep = qq.active()          # per-framework endpoint config
+        url = (ep.url or '').strip()
+        token = ep.accessToken or ''
+        # For SnowLuma, auto-read the port/token from its own config so the user
+        # doesn't have to copy the access token by hand (a wrong/empty token is
+        # what makes the WS server answer 401).
+        if qq.framework == 'snowluma':
+            det = self.snowluma_ws_auth()
+            if det:
+                host, port, det_token = det
+                if not url:
+                    url = f'ws://{host}:{port}'
+                # Prefer the live token from SnowLuma's config: after switching
+                # accounts a previously saved token would make the WS answer 401.
+                if det_token:
+                    token = det_token
+                uin = getattr(self, '_snowluma_uin', '')
+                if uin:
+                    self._post_ui({'kind': 'log', 'level': 'info',
+                                   'message': f'[QQ] SnowLuma 账号 UIN={uin}：'
+                                              f'已从 config/onebot_{uin}.json 读取端口/token。'})
         return {
-            'mode': cfg.mode,
-            'url': cfg.url,
-            'accessToken': cfg.accessToken or '',
-            'listenHost': cfg.listenHost or '0.0.0.0',
-            'listenPort': cfg.listenPort,
-            'groups': list(cfg.groups or []),
-            'imageAsLink': bool(cfg.imageAsLink),
-            'autoReconnect': bool(cfg.autoReconnect),
-            'healthCheckSeconds': int(cfg.healthCheckSeconds),
+            'mode': ep.mode,
+            'url': url or 'ws://127.0.0.1:3001',
+            'accessToken': token,
+            'listenHost': ep.listenHost or '0.0.0.0',
+            'listenPort': ep.listenPort,
+            'groups': list(qq.groups or []),
+            'imageAsLink': bool(qq.imageAsLink),
+            'autoReconnect': bool(qq.autoReconnect),
+            'healthCheckSeconds': int(qq.healthCheckSeconds),
         }
 
     def start_qq(self) -> None:
         if self._qq.running:
+            # Already connected: push updated settings (e.g. the group filter)
+            # without a full reconnect, so editing 「群号」 + 连接 takes effect.
+            try:
+                self._qq.set_groups(self.config.qq.groups or [])
+            except Exception:  # noqa: BLE001
+                pass
             return
         self._start_qq()
 
@@ -670,7 +1089,7 @@ class Controller:
         """QQ numbers known locally (NapCat config files + remembered ones)."""
         uins = set(self._qq_nicknames.keys())
         try:
-            for name in os.listdir(NAPCAT_CONFIG_DIR):
+            for name in os.listdir(self._napcat_config_dir()):
                 m = re.match(r'(?:napcat|onebot11|napcat_protocol)_(\d+)\.json$', name)
                 if m:
                     uins.add(m.group(1))
@@ -692,23 +1111,140 @@ class Controller:
             choices.append((uin, label))
         return choices
 
-    def start_napcat(self, uin: str = '') -> None:
-        """Launch the bundled NapCat launcher (optionally quick-login a QQ)."""
-        if not os.path.isfile(NAPCAT_LAUNCHER):
+    def start_qq_framework(self, uin: str = '') -> None:
+        """Launch the selected OneBot framework (SnowLuma or NapCat)."""
+        if self.config.qq.framework == 'napcat':
+            self._start_napcat(uin)
+        else:
+            self._start_snowluma(uin)
+
+    def _resolve_launcher(self, path: str):
+        """Return (argv_prefix, cwd) for a folder / .bat / .exe launcher path."""
+        if os.path.isdir(path):
+            names = ('launcher.bat', 'launcher.cmd', 'launcher.exe',
+                     'start.bat', 'start.cmd', 'run.bat', 'launcher.sh')
+            target = None
+            for name in names:
+                cand = os.path.join(path, name)
+                if os.path.isfile(cand):
+                    target = cand
+                    break
+            if target is None:
+                entries = sorted(os.listdir(path))
+                # prefer a launcher/start script
+                for name in entries:
+                    low = name.lower()
+                    if ('launcher' in low or 'start' in low) and low.endswith(
+                            ('.bat', '.cmd', '.exe')):
+                        target = os.path.join(path, name)
+                        break
+            if target is None:
+                # fall back to the first runnable-looking .exe / .bat
+                for name in sorted(os.listdir(path)):
+                    low = name.lower()
+                    if low.endswith('.exe') and not any(
+                            w in low for w in ('uninstall', 'unins', 'update', 'remove')):
+                        target = os.path.join(path, name)
+                        break
+            if target is None:
+                for name in sorted(os.listdir(path)):
+                    low = name.lower()
+                    if low.endswith(('.bat', '.cmd')):
+                        target = os.path.join(path, name)
+                        break
+            if target is None:
+                return None, path
+        else:
+            target = path
+        cwd = os.path.dirname(target) or None
+        if target.lower().endswith(('.bat', '.cmd')):
+            return ['cmd', '/c', target], cwd
+        return [target], cwd
+
+    def _start_snowluma(self, uin: str = '') -> None:
+        """Launch SnowLuma from the configured path (folder or executable)."""
+        path = (self.config.qq.snowluma.launcherPath or '').strip()
+        if not path or not os.path.exists(path):
+            for cand in (os.path.join(BASE_DIR, 'SnowLuma'),
+                         self._detect_running_snowluma_dir()):
+                if cand and os.path.exists(cand):
+                    path = cand
+                    break
+        if not path:
+            path = os.path.join(BASE_DIR, 'SnowLuma')
+        if not os.path.exists(path):
             self._post_ui({'kind': 'log', 'level': 'error',
-                           'message': '未找到 NapCat 启动脚本：' + NAPCAT_LAUNCHER})
+                           'message': f'未找到 SnowLuma 启动路径：{path}'
+                                      '（请在 QQ 转述页「启动路径」里填写 SnowLuma 目录或 launcher 文件）。'})
+            return
+        argv, cwd = self._resolve_launcher(path)
+        if not argv:
+            self._post_ui({'kind': 'log', 'level': 'error',
+                           'message': f'在 {path} 里找不到 launcher.bat / launcher.exe / start.bat，'
+                                      '请直接填写可执行文件路径。'})
+            return
+        try:
+            kwargs = {}
+            if os.name == 'nt':
+                kwargs['creationflags'] = subprocess.CREATE_NEW_CONSOLE
+            subprocess.Popen(argv, cwd=cwd, **kwargs)
+            self._post_ui({'kind': 'log', 'level': 'info',
+                           'message': '已启动 SnowLuma（首次请在它的 WebUI 里完成 QQ 登录与 OneBot 连接配置；'
+                                      'OneBot 正向地址默认 ws://127.0.0.1:3001）。'})
+        except Exception as e:  # noqa: BLE001
+            self._post_ui({'kind': 'log', 'level': 'error',
+                           'message': '启动 SnowLuma 失败: ' + str(e)})
+            return
+        if cwd:
+            try:
+                if os.name == 'nt':
+                    os.startfile(cwd)
+            except Exception:  # noqa: BLE001
+                pass
+
+    def _napcat_base_dir(self) -> str:
+        p = (self.config.qq.napcat.launcherPath or '').strip()
+        return p if p else NAPCAT_DIR
+
+    def _napcat_inner_dir(self) -> str:
+        base = self._napcat_base_dir()
+        inner = os.path.join(base, 'napcat')
+        return inner if os.path.isdir(inner) else base
+
+    def _napcat_config_dir(self) -> str:
+        for d in (os.path.join(self._napcat_inner_dir(), 'config'),
+                  os.path.join(self._napcat_base_dir(), 'config')):
+            if os.path.isdir(d):
+                return d
+        return os.path.join(self._napcat_inner_dir(), 'config')
+
+    def _napcat_cache_dir(self) -> str:
+        return os.path.join(self._napcat_inner_dir(), 'cache')
+
+    def _start_napcat(self, uin: str = '') -> None:
+        """Launch NapCat from the configured folder (or the bundled copy)."""
+        custom = (self.config.qq.napcat.launcherPath or '').strip()
+        argv, cwd = None, None
+        if custom and os.path.exists(custom):
+            argv, cwd = self._resolve_launcher(custom)
+        if not argv and os.path.isfile(NAPCAT_LAUNCHER):
+            argv, cwd = ['cmd', '/c', NAPCAT_LAUNCHER], NAPCAT_INNER_DIR
+        if not argv:
+            self._post_ui({'kind': 'log', 'level': 'error',
+                           'message': '未找到 NapCat 启动器。请在「QQ 转述 → 网关设置」的「启动路径」'
+                                      '填写 NapCat 目录（含 launcher-win10.bat / launcher.bat），'
+                                      '或留空使用随项目携带的 NapCat。'})
             return
         uin = str(uin or '').strip()
-        args = ['cmd', '/c', NAPCAT_LAUNCHER]
         if uin:
-            args += ['-q', uin]
+            argv = list(argv) + ['-q', uin]
             self.config.qq.lastLoginUin = uin
             self.config.save()
         try:
             kwargs = {}
             if os.name == 'nt':
                 kwargs['creationflags'] = subprocess.CREATE_NEW_CONSOLE
-            subprocess.Popen(args, cwd=NAPCAT_INNER_DIR, **kwargs)
+            subprocess.Popen(argv, cwd=cwd, **kwargs)
             self._post_ui({'kind': 'log', 'level': 'info',
                            'message': ('已启动 NapCat 并请求快速登录 ' + uin) if uin
                                       else '已启动 NapCat（会弹窗/UAC 提权，首次请扫码登录）。'})
@@ -718,11 +1254,16 @@ class Controller:
             return
         self._open_napcat_cache()
 
+    # Backwards-compatible alias.
+    def start_napcat(self, uin: str = '') -> None:
+        self.start_qq_framework(uin)
+
     def _open_napcat_cache(self) -> None:
         try:
-            os.makedirs(NAPCAT_CACHE_DIR, exist_ok=True)
+            cache = self._napcat_cache_dir()
+            os.makedirs(cache, exist_ok=True)
             if os.name == 'nt':
-                os.startfile(NAPCAT_CACHE_DIR)
+                os.startfile(cache)
             self._post_ui({'kind': 'log', 'level': 'info',
                            'message': '已打开 NapCat cache 目录（扫码二维码 qrcode.png 会出现在这里）。'})
         except Exception as e:  # noqa: BLE001
@@ -736,9 +1277,12 @@ class Controller:
             try:
                 self._public_base_cache = ''
                 self._photo.start(cfg.imageHttpHost, cfg.imageHttpPort)
-                base = self._image_base_url()
+                # Detect the public base in the background: it does several HTTP
+                # requests and must never freeze the UI thread (which would make
+                # the 「启用」 checkbox un-clickable).
                 self._post_ui({'kind': 'log', 'level': 'info',
-                               'message': f'图片服务已启动：{base}/pic_http/（端口 {cfg.imageHttpPort}）'})
+                               'message': f'图片服务已启动（端口 {cfg.imageHttpPort}），公网地址探测中…'})
+                threading.Thread(target=self._log_public_base, daemon=True).start()
             except Exception as e:  # noqa: BLE001
                 self._post_ui({'kind': 'log', 'level': 'error',
                                'message': '启动图片服务失败: ' + str(e)})
@@ -755,14 +1299,30 @@ class Controller:
         # (which processes QQ engine events) is alive.
         self._ensure_worker()
 
+    def _log_public_base(self) -> None:
+        try:
+            base = self._image_base_url()
+            self._post_ui({'kind': 'log', 'level': 'info',
+                           'message': f'图片链接公网地址：{base}/pic_http/'})
+        except Exception:  # noqa: BLE001
+            pass
+
     def _stop_qq(self) -> None:
         was_running = self._qq.running
-        self._qq.stop()
-        self._photo.stop()
+        try:
+            self._qq.stop()
+        except Exception as e:  # noqa: BLE001
+            self._post_ui({'kind': 'log', 'level': 'warn',
+                           'message': '停止 QQ 引擎时出错: ' + str(e)})
+        try:
+            self._photo.stop()
+        except Exception:  # noqa: BLE001
+            pass
         self._qq_connected = False
         self._qq_last_state = None
+        self._post_ui({'kind': 'qqStatus', 'state': 'disconnected'})
         if was_running:
-            self._post_ui({'kind': 'qqStatus', 'state': 'disconnected'})
+            self._post_ui({'kind': 'log', 'level': 'info', 'message': 'QQ 转述已停止。'})
 
     def restart_qq(self) -> None:
         """(Re)start the QQ relay with the current settings."""
@@ -772,11 +1332,15 @@ class Controller:
     def set_qq_enabled(self, enabled: bool) -> None:
         self.config.qq.enabled = bool(enabled)
         self.config.save()
-        if enabled:
-            if not self._qq.running:
-                self._start_qq()
-        else:
-            self._stop_qq()
+        try:
+            if enabled:
+                if not self._qq.running:
+                    self._start_qq()
+            else:
+                self._stop_qq()
+        except Exception as e:  # noqa: BLE001
+            self._post_ui({'kind': 'log', 'level': 'error',
+                           'message': '切换 QQ 转述出错: ' + str(e)})
         self._post_ui({'kind': 'log', 'level': 'info',
                        'message': 'QQ 转述已' + ('启用' if enabled else '禁用') + '。'})
 
@@ -834,7 +1398,18 @@ class Controller:
             self._post_ui({'kind': 'qqStatus', 'state': 'disconnected'})
 
     def _relay_qq_message(self, ev: Dict[str, Any]) -> None:
+        # Direction switch: turning QQ->MC off only stops forwarding; the QQ /
+        # OneBot connection (and MC->QQ) keeps running.
+        if not self.config.qq.qqToMcEnabled:
+            return
         if not self._engine.running:
+            # Surface *why* nothing was forwarded instead of silently dropping.
+            now = time.time()
+            if now - self._qq_relay_warn_at > 30:
+                self._qq_relay_warn_at = now
+                self._post_ui({'kind': 'log', 'level': 'warn',
+                               'message': '[QQ] 收到群消息，但 MC 机器人未连接，无法转发到游戏；'
+                                          '请先点顶部「连接」进入服务器。'})
             return
         content = ev.get('content') or ''
         if self.config.qq.imageAsLink and ev.get('images'):
@@ -973,6 +1548,488 @@ class Controller:
     # ------------------------------------------------------------------
     # MC -> QQ relay ("[sentQ] ..." in public chat)
     # ------------------------------------------------------------------
+    def _is_self_name(self, name: str) -> bool:
+        """宽松判断某个聊天显示名是不是机器人自己（去掉称号/括号再比）。"""
+        if not name or not self._bot_username:
+            return False
+        bot = str(self._bot_username).strip().lower()
+        raw = str(name).strip().lower()
+        if raw == bot:
+            return True
+        cleaned = re.sub(r'[\[【（(][^\]】）)]*[\]】）)]', '', raw).strip()
+        return bool(bot) and (cleaned == bot or cleaned.endswith(bot) or raw.endswith(bot))
+
+    def _looks_like_play_text(self, text: str) -> bool:
+        """payload 是否像机器人自己发的播放文案（按 playText 的固定文字判断）。"""
+        t = (text or '').strip().lower()
+        if not t:
+            return False
+        template = (self.config.song.playText or '{player} 点了一首 {music}').lower()
+        for chunk in re.split(r'\{[a-z]+\}', template):
+            chunk = chunk.strip()
+            if len(chunk) >= 3 and chunk in t:
+                return True
+        return False
+
+    @staticmethod
+    def _song_key(text: str) -> str:
+        """歌曲去重用的归一化 key（去掉直链、括号备注、by 尾巴）。"""
+        t = re.sub(r'\s*\|\s*.*$', '', str(text or '')).strip().lower()
+        t = re.sub(r'[（(][^）)]*[）)]', '', t)
+        t = re.sub(r'\bby\b.*$', '', t)
+        return t.strip(' -—·\t')
+
+    @staticmethod
+    def _trigger_aliases(trigger: str) -> List[str]:
+        """触发词的全角写法（``【点歌】`` / ``〔点歌〕`` / ``［点歌］``）。
+
+        帮助说明里用的是这种写法 → 玩家照着打也能点歌（机器人两种都认），
+        而客户端 Mod 只认半角 ``[点歌]``，所以**帮助消息不会被 Mod 当成一次点歌**
+        （否则每个看帮助的人都会让 Mod 干等 30 秒，再报一句「没找到」）。
+        """
+        t = str(trigger or '').strip()
+        if len(t) < 3 or t[0] != '[' or t[-1] != ']':
+            return []
+        body = t[1:-1]
+        return [lb + body + rb for lb, rb in (('【', '】'), ('〔', '〕'), ('［', '］'))]
+
+    @staticmethod
+    def _msg_name(name: str) -> str:
+        """玩家名能不能拿来发 ``/msg``（不能就返回空串）。
+
+        顺手挡掉带空格 / 换行 / ``/`` / ``§`` 的名字，避免命令注入。
+        """
+        n = str(name or '').strip()
+        if not n or len(n) > 32:
+            return ''
+        if any(ch.isspace() or ch in '/\\§' for ch in n):
+            return ''
+        return n
+
+    def _song_private(self) -> bool:
+        """是否「谁点谁听」：播放数据私聊发给点歌的人。"""
+        return bool(getattr(self.config.song, 'privatePlay', True))
+
+    def _send_song_line(self, who: str, line: str, is_play_data: bool = False) -> bool:
+        """把一条点歌相关消息发出去：谁都听（公屏）或只放给点歌的人（私聊）。
+
+        返回 True 表示是私聊发出去的。**长度按「整条命令」算**：私聊时 ``/msg <名字> ``
+        也算进 MC 的 256 上限，超了服务器会直接踢机器人。
+        """
+        target = self._msg_name(who) if self._song_private() else ''
+        if target:
+            cmd = f'/msg {target} '
+            budget = max(40, 250 - len(cmd))
+            if len(line) > budget:
+                line = line[:budget]      # 兜底截断（正常不会走到这：上面已按 limit 拆好）
+            try:
+                if self._engine.say(cmd + line):
+                    return True
+            except Exception:  # noqa: BLE001
+                pass
+            # 私聊发不出去（机器人没连上？）→ 退回公屏，至少点歌的人能听到
+            self._post_ui({'kind': 'log', 'level': 'warn',
+                           'message': f'[点歌] 私聊 {target} 失败，改发公屏'})
+        self.send_chat(line[:250])
+        return False
+
+    def _send_song_help(self, who: str) -> None:
+        """私聊（``/msg``）玩家：点歌触发词的全部用法。跑在后台线程里，一条一条慢慢发。"""
+        name = str(who or '').strip()
+        if not re.fullmatch(r'[A-Za-z0-9_]{1,16}', name):
+            self._post_ui({'kind': 'log', 'level': 'warn',
+                           'message': f'[点歌] 「{who}」不像游戏 ID，帮助私聊没发出去'})
+            return
+        trigger = (self.config.song.trigger or '[点歌]').strip() or '[点歌]'
+        aliases = self._trigger_aliases(trigger)
+        t = aliases[0] if aliases else trigger
+        stop_word = (self.config.song.stopWord or '停止').strip() or '停止'
+        lines = [
+            f'点歌用法：聊天里发 {t} 后面跟下面这些词（半角中括号写法也一样）',
+            f'{t}歌名 → 点歌，例：{t}起风了（装了 Mod 的人全都能听到）',
+            f'{t}{stop_word} → 停止播放并清空播放队列',
+            f'{t}台 → 打开点歌台界面（Mod 里按 K 也能开）',
+            f'{t}help → 看这条帮助；{t}登录/{t}登出 → 提示去哪登录网易云；'
+            f'也可以直接发网易云链接或数字 id，例：{t}1901371647',
+            '没装 Mod 听不到：在聊天里发一次点歌，机器人会回你 Mod 下载链接',
+        ]
+        ok = 0
+        for line in lines:
+            try:
+                if not self._engine.say(f'/msg {name} {line}'):
+                    break
+            except Exception:  # noqa: BLE001
+                break
+            ok += 1
+            time.sleep(0.4)      # 别刷太快被服务器当刷屏
+        self._post_ui({'kind': 'log', 'level': 'song' if ok else 'warn',
+                       'message': (f'[点歌] 已私聊 {name} 点歌用法（{ok}/{len(lines)} 条）'
+                                   if ok else f'[点歌] 私聊 {name} 失败（机器人没连上？）')})
+
+    @staticmethod
+    def _encode_url(url: str) -> str:
+        """把直链编码成「公屏链接过滤完全认不出来」的形式（消息里连 http 都不出现）。
+
+        ① 去掉查询串（`?vuutv=…`，实测去掉照样能播，也短一截、不容易超 256 字符上限）；
+        ② 去掉协议头，用 {@code ¤}=http、{@code ¥}=https 代替；
+        ③ 把 `.` `/` `:` 换成 URL 里绝不会出现的安全字符。
+        客户端 Mod 还原（见 SongModClient.extractObfuscatedUrl）。
+        """
+        u = str(url or '').strip().split('?', 1)[0]
+        mark = URL_MARK_HTTP
+        if u.startswith('https://'):
+            mark, u = URL_MARK_HTTPS, u[len('https://'):]
+        elif u.startswith('http://'):
+            mark, u = URL_MARK_HTTP, u[len('http://'):]
+        return mark + u.replace('.', '·').replace('/', '¦').replace(':', '∶')
+
+    def _maybe_song_reply(self, player: str, content: str, raw: str = '') -> bool:
+        """看到聊天里的「点歌」触发词：
+        ① 日志页记一条歌曲日志；
+        ②（可选）用**机器人的会员 Cookie** 解析出可播放直链，发到公屏（客户端 Mod 播放）；
+        ③（可选）回一条 Mod 下载链接（提醒没装的人）。
+        返回 True 表示这条消息已被处理。"""
+        song = self.config.song
+        if self._is_self_name(player):
+            return False
+        trigger = (song.trigger or '').strip()
+        if not trigger:
+            return False
+        text = raw or content or ''
+        # 全角写法也认（【点歌】歌名 / 〔点歌〕歌名 / ［点歌］歌名）——帮助里用的就是这个写法，
+        # 玩家直接抄也能点；而客户端 Mod 只认半角 [点歌]，所以帮助消息不会被 Mod 当成点歌。
+        if trigger not in text:
+            for alias in self._trigger_aliases(trigger):
+                if alias and alias in text:
+                    text = text.replace(alias, trigger)
+                    break
+        low = text.lower()
+        pos = low.find(trigger.lower())
+        if pos < 0:
+            return False
+        after = text[pos + len(trigger):].strip()
+        stop_word = (song.stopWord or '').strip()
+        who = player or '?'
+
+        # 停止指令：[点歌]停止 —— **只清这个玩家自己的**（谁点谁听，别把别人的歌关了）
+        if stop_word and after.lower() == stop_word.lower():
+            self.clear_song_queue(who)
+            self._post_ui({'kind': 'log', 'level': 'song',
+                           'message': f'[点歌] {who} 停止了点歌'})
+            return False
+        # 登录/登出等指令：不算点歌，也不回链接
+        if after in ('登录', '登出'):
+            self._post_ui({'kind': 'log', 'level': 'song',
+                           'message': f'[点歌] {who} 执行了「{after}」'})
+            return False
+        if not after:
+            return False
+        # 帮助：[点歌]help → /msg 私聊这个玩家，列出所有提示词用法（不进队列、不回下载链接）
+        if after.lower() in ('help', 'h', '?', '？', '帮助', '用法', '指令'):
+            self._post_ui({'kind': 'log', 'level': 'song',
+                           'message': f'[点歌] {who} 看了点歌用法（已私聊 {who}）'})
+            threading.Thread(target=self._send_song_help, args=(who,), daemon=True).start()
+            return True
+        # 「点歌台」是 Mod 的游戏内界面（Mod 自己会开），机器人不当成点歌请求
+        if after.lower() in ('台', '界面', 'gui', '菜单', '点歌台'):
+            self._post_ui({'kind': 'log', 'level': 'song',
+                           'message': f'[点歌] {who} 打开了点歌台界面'})
+            return True
+        # ① 机器人自己发的播放数据：带音频直链、或带混淆直链标记的，一律不再解析（防自触发死循环）
+        if (' | ' in after or URL_MARK_HTTP in after or URL_MARK_HTTPS in after
+                or _AUDIO_URL_RE.search(after)):
+            return False
+        # ② 文案里带播放模板的固定文字（默认「点了一首」）→ 也是机器人自己发的
+        if self._looks_like_play_text(after):
+            return False
+        # ③ 这首歌刚刚发过（多半是同一首歌又被点了一次）：**不再搜一遍**，直接把缓存好的直链
+        #    换成新的点歌人重发 —— 快速响应、不等待；链接里还有 `id:` 供 Mod 自己兜底重取。
+        posted_key = self._song_key(after)
+        recent = self._song_recent.get(posted_key) if posted_key else None
+        if recent and (time.time() - recent[0]) < 480:
+            # 防死循环（万一服务器把我们的格式全洗掉、自己的消息又被当成点歌）：
+            # 同一首歌 20 秒内被「再点」超过 4 次 → 当成回声，直接忽略
+            now1 = time.time()
+            if now1 - getattr(self, '_replay_window_at', 0.0) > 20:
+                self._replay_window_at = now1
+                self._replay_window_n = 0
+            self._replay_window_n = getattr(self, '_replay_window_n', 0) + 1
+            if self._replay_window_n > 4:
+                return False
+            replay = dict(recent[1])
+            replay['who'] = who
+            self._post_ui({'kind': 'log', 'level': 'song',
+                           'message': f'[点歌] {who} 又点了《{replay.get("title")}》→ '
+                                      f'直接复用刚才的直链重播（不再搜索）'})
+            if song.postPlayLink:
+                self._song_queue.insert(0, replay)   # 插到队首：下一秒就发（配合「立刻插播」）
+            # 回下载链接的逻辑照走（让没装 Mod 的人也能看到）
+            if not song.replyEnabled:
+                return True
+            now = time.time()
+            if now - self._song_reply_at.get(who, 0.0) < max(0, int(song.replyCooldownSeconds)):
+                return True
+            self._song_reply_at[who] = now
+            if song.modUrl:
+                self._send_song_line(who, song.build_reply())
+            return True
+        # ④ 突发限流：20 秒内最多处理 12 次点歌（防止任何形式的刷屏/循环）
+        now0 = time.time()
+        if now0 - getattr(self, '_song_burst_at', 0.0) > 20:
+            self._song_burst_at = now0
+            self._song_burst_n = 0
+        self._song_burst_n = getattr(self, '_song_burst_n', 0) + 1
+        if self._song_burst_n > 12:
+            self._post_ui({'kind': 'log', 'level': 'warn',
+                           'message': '[点歌] 短时间点歌太多，已忽略这条（防刷屏）'})
+            return False
+
+        # 每次点歌记一条日志
+        self._post_ui({'kind': 'log', 'level': 'song',
+                       'message': f'[点歌] {who} 点了歌：{after}'})
+
+        # ② 解析后加入播放队列（网络操作放后台线程）
+        if song.postPlayLink:
+            self.enqueue_song(after, who, 'player')
+
+        # ③ 回一条 Mod 下载链接
+        if not song.replyEnabled:
+            return True
+        now = time.time()
+        if now - self._song_reply_at.get(who, 0.0) < max(0, int(song.replyCooldownSeconds)):
+            return True
+        self._song_reply_at[who] = now
+        if not song.modUrl:
+            self._post_ui({'kind': 'log', 'level': 'warn',
+                           'message': '[点歌] 「点歌」页还没填 Mod 下载链接，无法回复给需要的人。'})
+            return True
+        private = self._send_song_line(who, song.build_reply())
+        self._post_ui({'kind': 'log', 'level': 'song',
+                       'message': f"[点歌] 已{'私聊 ' + who if private else '公屏回复'} Mod 下载链接"})
+        return True
+
+    # ------------------------------------------------------------------
+    # 点歌播放队列（机器人真队列）
+    # ------------------------------------------------------------------
+    def song_state(self) -> Dict[str, Any]:
+        """给 GUI 用：当前播放 + 队列快照。"""
+        return {
+            'current': dict(self._song_current) if self._song_current else None,
+            'queue': [dict(e) for e in self._song_queue],
+        }
+
+    def enqueue_song(self, query: str, who: str = '我', source: str = 'gui') -> None:
+        """把一次点歌解析后加入播放队列（解析在后台线程做）。"""
+        query = (query or '').strip()
+        if not query:
+            return
+        self._post_ui({'kind': 'log', 'level': 'song',
+                       'message': f'[点歌] {who} 点了歌：{query}（加入队列）'})
+        threading.Thread(target=self._resolve_into_queue,
+                         args=(query, who, source), daemon=True).start()
+
+    def _resolve_into_queue(self, query: str, who: str, source: str) -> None:
+        cookie = self.config.song.neteaseCookie
+        try:
+            from . import netease
+            info = netease.resolve(query, cookie)
+        except Exception as e:  # noqa: BLE001
+            self._post_ui({'kind': 'log', 'level': 'warn',
+                           'message': f'[点歌] 解析「{query}」失败：{e}'})
+            return
+        if not info:
+            self._post_ui({'kind': 'log', 'level': 'warn',
+                           'message': f'[点歌] 没找到「{query}」'})
+            return
+        title = info.get('title') or query
+        artists = info.get('artists') or []
+        artist = '/'.join([str(a) for a in artists]) if artists else '未知歌手'
+        if not info.get('url'):
+            note = info.get('note') or '无法获取播放地址'
+            self._post_ui({'kind': 'log', 'level': 'warn',
+                           'message': f'[点歌] {title} - {artist}：{note}'})
+            return
+        self._song_seq += 1
+        entry = {
+            'seq': self._song_seq,
+            'who': who,
+            'source': source,
+            'query': query,
+            'title': title,
+            'artist': artist,
+            'url': info['url'],
+            'id': str(info.get('id') or ''),
+            'duration': int(info.get('duration') or 0),
+            'trial': int(info.get('trial') or 0),
+            'added_at': time.time(),
+        }
+        self._song_queue.append(entry)
+        self._post_ui({'kind': 'log', 'level': 'song',
+                       'message': f'[点歌] 已加入队列：{title} - {artist}'
+                                  f'（队列 {len(self._song_queue)} 首）'})
+
+    def enqueue_existing(self, entry: Dict[str, Any], who: str = '我', source: str = 'gui') -> None:
+        """把队列里已有的某首（别人的）歌，按原样再加进队列（不再解析）。"""
+        url = entry.get('url')
+        if not url:
+            return
+        self._song_seq += 1
+        item = {
+            'seq': self._song_seq,
+            'who': who,
+            'source': source,
+            'query': entry.get('query') or entry.get('title') or '',
+            'title': entry.get('title') or '',
+            'artist': entry.get('artist') or '',
+            'url': url,
+            'id': str(entry.get('id') or ''),
+            'duration': int(entry.get('duration') or 0),
+            'trial': int(entry.get('trial') or 0),
+            'added_at': time.time(),
+        }
+        self._song_queue.append(item)
+        self._post_ui({'kind': 'log', 'level': 'song',
+                       'message': f"[点歌] {who} 也要听：{item['title']} - {item['artist']}"
+                                  f"（队列 {len(self._song_queue)} 首）"})
+
+    def clear_song_queue(self, who: str = '') -> None:
+        """停止/清空播放队列。
+
+        带 ``who`` 时**只清这个玩家自己的** —— 「谁点谁听」下这是必须的：
+        A 发 ``[点歌]停止`` 不该把 B 正在听的歌也关了。不带 ``who`` 就是全清（GUI 的「清空队列」用）。
+        """
+        target = str(who or '').strip().lower()
+        if target:
+            before = len(self._song_queue)
+            self._song_queue[:] = [
+                e for e in self._song_queue
+                if str(e.get('who') or '').strip().lower() != target
+            ]
+            removed = before - len(self._song_queue)
+            mine_current = (self._song_current is not None
+                            and str(self._song_current.get('who') or '').strip().lower() == target)
+            if mine_current:
+                self._song_current = None
+                self._song_next_at = 0.0
+            self._post_ui({'kind': 'log', 'level': 'song',
+                           'message': f'[点歌] {who} 停止：只清了他/她自己的 {removed} 首'
+                                      f'{"（含正在放的那首）" if mine_current else ""}，'
+                                      f'别人的 {len(self._song_queue)} 首不动'})
+            return
+        n = len(self._song_queue)
+        self._song_queue.clear()
+        self._song_current = None
+        self._song_next_at = 0.0
+        self._post_ui({'kind': 'log', 'level': 'song',
+                       'message': f'[点歌] 已清空播放队列（{n} 首）'})
+
+    def _song_tick(self) -> None:
+        """每秒调用：当前放完就播下一首；开了「立刻插播」就新歌一到马上放（打断当前这首）。"""
+        now = time.time()
+        if self._song_current is not None:
+            if now < self._song_next_at:
+                # 当前这首还没放完。没排队的就继续等；有排队的且开了「立刻插播」就马上换歌。
+                instant = bool(getattr(self.config.song, 'instantPlay', True))
+                if not self._song_queue or not instant:
+                    return
+                self._post_ui({'kind': 'log', 'level': 'song',
+                               'message': f"[点歌] 新点歌立刻插播，打断："
+                                          f"{self._song_current.get('title')}"})
+            else:
+                self._post_ui({'kind': 'log', 'level': 'song',
+                               'message': f"[点歌] 播完：{self._song_current.get('title')}"})
+            self._song_current = None
+        if not self._song_queue:
+            return
+        entry = self._song_queue.pop(0)
+        self._post_song_entry(entry, now)
+
+    def _post_song_entry(self, entry: Dict[str, Any], now: Optional[float] = None) -> None:
+        """把一条点歌发出去（客户端 Mod 播放），并记账（防自触发 + 供重复点歌复用）。
+
+        「谁点谁听」（``song.privatePlay`` 默认开）时播放数据用 ``/msg`` **私聊**发给点歌的人，
+        公屏上不出现 —— 其他玩家的 Mod 不会跟着响。
+        """
+        now = time.time() if now is None else now
+        trigger = (self.config.song.trigger or '[点歌]').strip() or '[点歌]'
+        music = f"{entry['title']} - {entry['artist']}"
+        trial = int(entry.get('trial') or 0)
+        if trial:
+            music += (f'（试听{trial}s，机器人未登录会员）' if trial > 0 else '（试听片段）')
+        template = (self.config.song.playText or '{player} 点了一首 {music}')
+        text = (template.replace('{player}', str(entry.get('who') or '?'))
+                .replace('{music}', music)
+                .replace('{title}', str(entry.get('title')))
+                .replace('{artist}', str(entry.get('artist'))))
+        # 公屏会把 http(s):// 链接整条替换成「[链接]」，所以发**混淆后的直链**（Mod 侧还原）。
+        enc = self._encode_url(entry['url'])
+        title = str(entry.get('title') or '')
+        # 再附一个歌曲 id（第二道保险）：万一服务器还动了这条消息，Mod 可以自己用 id 取链。
+        # ⚠ 不能用 `#`（会被服务器当十六进制颜色码吃掉，`#3399839173` → `9173`）、也不能用 `&`（MC 颜色符）。
+        sid = str(entry.get('id') or '')
+        idtag = f' id:{sid}' if sid else ''
+        who = str(entry.get('who') or '')
+        # 私聊时整条要发的是命令 `/msg <名字> <内容>` —— MC 单包上限 256，命令名+名字也算长度！
+        # （之前没算：文案长一点就直接超限，服务器反手把机器人踢了）
+        target = self._msg_name(who) if self._song_private() else ''
+        limit = 250 - (len(f'/msg {target} ') if target else 0)
+        limit = max(80, limit)
+
+        def build(title_text: str, with_enc: bool, with_id: bool) -> str:
+            parts = [f'{trigger}{title_text} | ']
+            if with_enc:
+                parts.append(enc)
+            if with_id and idtag:
+                parts.append(idtag)
+            return ''.join(parts).strip()
+
+        line = build(text, True, True)
+        if len(line) > limit:
+            # 太长：文案单独发一条（**不带触发词**，Mod 忽略、玩家看得见）
+            try:
+                self._send_song_line(who, text[:limit])
+            except Exception:  # noqa: BLE001
+                pass
+            line = build(title, True, True)
+        if len(line) > limit:
+            line = build(title, True, False)          # 丢掉 id 标记
+        if len(line) > limit:
+            keep = max(0, limit - len(trigger) - len(enc) - 3)
+            line = build(title[:keep], True, False)   # 缩歌名
+        if len(line) > limit:
+            # 直链实在太长（罕见）：只发 id，Mod 用自己的 Cookie 取链（没填 Cookie 就是试听）
+            line = build(title, False, True)
+            self._post_ui({'kind': 'log', 'level': 'warn',
+                           'message': '[点歌] 直链太长发不出去，已改成只发歌曲 id（Mod 自己取链）'})
+        private = self._send_song_line(who, line, is_play_data=True)
+        # 记下刚发过的这首歌：① 防止自己的消息被再次当成点歌（循环）；② 重复点时直接复用
+        try:
+            snapshot = dict(entry)
+            # 同一首歌的多种写法都登记（歌名 / 歌名-歌手 / 渲染后的文案 / 玩家当初打的关键词），
+            # 这样「又点同一首」时无论怎么写都能命中缓存 → 不再重新搜索
+            alias_keys = [
+                self._song_key(music),
+                self._song_key(text),
+                self._song_key(title),
+                self._song_key(f"{title} {entry.get('artist') or ''}"),
+                self._song_key(entry.get('query') or ''),
+            ]
+            for key in alias_keys:
+                if key:
+                    self._song_posted_at[key] = now
+                    self._song_recent[key] = (now, snapshot)
+        except Exception:  # noqa: BLE001
+            pass
+        self._song_current = entry
+        duration = int(entry.get('duration') or 0)
+        if duration <= 0:
+            duration = 180000
+        self._song_next_at = now + duration / 1000.0 + 2.0
+        self._post_ui({'kind': 'log', 'level': 'song',
+                       'message': f"[点歌] {'已私聊 ' + who if private else '已发公屏'}："
+                                  f"{entry['title']} - {entry['artist']}"
+                                  f"（{int(duration / 1000)}s，队列剩 {len(self._song_queue)} 首）"})
+
     def _maybe_relay_mc_to_qq(self, player: str, content: str) -> bool:
         """If an in-game message starts with the trigger, forward it to a QQ
         group. Returns True when the message was consumed (AI should skip it)."""
@@ -1331,13 +2388,21 @@ class Controller:
             except queue.Empty:
                 ev = None
             if ev is not None:
-                self._process_bot_event(ev)
+                try:
+                    self._process_bot_event(ev)
+                except Exception as e:  # noqa: BLE001
+                    self._post_ui({'kind': 'log', 'level': 'error',
+                                   'message': '处理游戏事件出错: ' + str(e)})
             while True:
                 try:
                     qev = self._qq_events.get_nowait()
                 except queue.Empty:
                     break
-                self._process_qq_event(qev)
+                try:
+                    self._process_qq_event(qev)
+                except Exception as e:  # noqa: BLE001
+                    self._post_ui({'kind': 'log', 'level': 'error',
+                                   'message': '处理 QQ 事件出错: ' + str(e)})
             now = time.time()
             if self._reconnect_at is not None and now >= self._reconnect_at:
                 self._run_reconnect()
@@ -1347,6 +2412,10 @@ class Controller:
                 self._maybe_proactive_reconnect()
                 self._maybe_auto_lobby()
                 self._maybe_online_check()
+                try:
+                    self._song_tick()
+                except Exception:  # noqa: BLE001
+                    pass
                 if self.ai_player:
                     try:
                         self.ai_player.tick()
@@ -1388,6 +2457,8 @@ class Controller:
                 return
             if not private and self._maybe_relay_mc_to_qq(player, content):
                 return
+            if not private and self._maybe_song_reply(player, content, raw):
+                return
             if self.ai_player:
                 try:
                     self.ai_player.on_player_message(player, content, raw=raw)
@@ -1407,12 +2478,14 @@ class Controller:
             self._reconnect_attempts = 0
             self._reconnect_at = None
             self._keep_retry_deadline = None
+            self._service_outage = None
+            self._service_error_count = 0
             username = ev.get('username') or ''
             if username:
                 self._bot_username = username
                 if self.ai_player:
                     self.ai_player.set_bot_username(username)
-                self.ai_player.set_online(True)
+                    self.ai_player.set_online(True)
             players = ev.get('players') or []
             self._post_ui({'kind': 'status', 'text': f'已连接（{username}）'})
             self._post_ui({'kind': 'spawn', 'username': username, 'players': players})
@@ -1439,6 +2512,20 @@ class Controller:
             relogin = self._maybe_request_relogin(ev.get('reason', ''))
             if not relogin:
                 self._schedule_reconnect(kicked=was_connected)
+        elif event == 'serviceError':
+            kind = ev.get('kind') or 'unknown'
+            detail = ev.get('detail') or ''
+            friendly = ev.get('message') or '连接服务出错'
+            self._service_outage = kind
+            self._service_error_count += 1
+            now = time.time()
+            # 首次、或每 60 秒提示一次，避免刷屏。
+            if self._service_error_count == 1 or now - self._last_service_error_log >= 60:
+                self._last_service_error_log = now
+                extra = f'（{detail}）' if detail else ''
+                self._post_ui({'kind': 'log', 'level': 'warn',
+                               'message': f'{friendly}{extra}。已进入退避重试，不会一直刷屏；'
+                                          f'等对方恢复后会自动连上。'})
         elif event == 'error':
             self._post_ui({'kind': 'log', 'level': 'error',
                            'message': 'Bot 错误: ' + ev.get('message', '')})
@@ -1470,6 +2557,22 @@ class Controller:
         elif event == 'msa':
             self._post_ui({'kind': 'log', 'level': 'msa',
                            'message': '[正版登录] ' + str(ev.get('message') or '')})
+        elif event == 'bookProgress':
+            self.save_book_progress(
+                nextPage=int(ev.get('nextPage', 0)),
+                nextBook=int(ev.get('nextBook', 1)),
+                updated=time.strftime('%Y-%m-%d %H:%M:%S'))
+            prog = self.load_book_progress()
+            self._post_ui({'kind': 'bookProgress',
+                           'nextPage': int(ev.get('nextPage', 0)),
+                           'nextBook': int(ev.get('nextBook', 1)),
+                           'done': int(ev.get('done', 0)),
+                           'total': int(ev.get('total', 0)),
+                           'totalPages': int(prog.get('totalPages', 0) or 0)})
+        elif event == 'bookResult':
+            ok = bool(ev.get('ok'))
+            self._post_ui({'kind': 'log', 'level': 'sent' if ok else 'error',
+                           'message': '[书与笔] ' + str(ev.get('message') or '')})
 
     def _maybe_request_relogin(self, text: str) -> bool:
         """When a LittleSkin session appears invalid, ask the GUI to re-login once.
@@ -1493,7 +2596,44 @@ class Controller:
                 self._maybe_forward_log_to_mc(ev.get('level'), ev.get('message'))
             except Exception:  # noqa: BLE001
                 pass
+        try:
+            self._record_ui_event(ev)
+        except Exception:  # noqa: BLE001
+            pass
         self.ui_queue.put(ev)
+
+    # ------------------------------------------------------------------
+    # Log persistence (low level)
+    # ------------------------------------------------------------------
+    def record_log(self, text) -> None:
+        """Record a UI-originated log line into the persistent log buffer."""
+        self.log_saver.add(text)
+
+    def _record_ui_event(self, ev: Dict[str, Any]) -> None:
+        """Mirror backend UI events into the persistent log buffer.
+
+        Server chat / announcements / command output (``kind == 'log'`` with
+        level ``server``) and private messages all funnel through here, so every
+        server message is saved even if it is never read from the GUI.
+        """
+        if not isinstance(ev, dict):
+            return
+        kind = ev.get('kind')
+        if kind == 'log':
+            self.log_saver.add(ev.get('message', ''))
+        elif kind == 'chat':
+            prefix = '[私聊] ' if ev.get('private') else ''
+            self.log_saver.add(
+                f'{prefix}{ev.get("player", "?")}: {ev.get("content", "")}')
+        elif kind == 'actionBar':
+            self.log_saver.add(f'[ActionBar] {ev.get("text", "")}')
+
+    def tick_log_save(self) -> None:
+        """Flush the log buffer when the calendar day rolls over."""
+        saved = self.log_saver.maybe_roll()
+        if saved:
+            self._post_ui({'kind': 'log', 'level': 'info',
+                           'message': f'日志已保存：{os.path.basename(saved)}'})
 
     def _maybe_forward_log_to_mc(self, level: Optional[str], message) -> None:
         """Forward selected log lines (default: errors) to the MC public chat."""
