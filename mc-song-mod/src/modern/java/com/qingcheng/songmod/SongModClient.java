@@ -377,14 +377,62 @@ public class SongModClient implements ClientModInitializer {
         if (mc == null) {
             return;
         }
-        mc.execute(() -> {
-            try {
-                if (mc.gui != null && mc.gui.getChat() != null) {
-                    mc.gui.getChat().addClientSystemMessage(Component.literal(msg));
-                }
-            } catch (Throwable ignored) {
-                // ignore
+        mc.execute(() -> addChatLine(msg));
+    }
+
+    /**
+     * 往聊天栏打一行客户端提示。
+     *
+     * <p>26.x 里这个入口挪过窝：<b>26.1.x</b> 是 {@code mc.gui.getChat()}，
+     * <b>26.2</b> 变成了 {@code mc.gui.hud.getChat()}（Gui 里只剩 {@code hud}）。所以用反射两条路都试，
+     * 失败就退化成写日志 —— 任何版本差异都不该影响播放本身。
+     */
+    private static void addChatLine(String msg) {
+        Minecraft mc = Minecraft.getInstance();
+        try {
+            if (mc == null || mc.gui == null) {
+                return;
             }
-        });
+            Object chat = callNoArg(mc.gui, "getChat");
+            if (chat == null) {
+                Object hud = getField(mc.gui, "hud");
+                if (hud != null) {
+                    chat = callNoArg(hud, "getChat");
+                }
+            }
+            if (chat == null) {
+                System.out.println("[songmod] " + msg);
+                return;
+            }
+            chat.getClass().getMethod("addClientSystemMessage", Component.class)
+                    .invoke(chat, Component.literal(msg));
+        } catch (Throwable t) {
+            // 最后兜底：至少日志里有
+            System.out.println("[songmod] " + msg);
+        }
+    }
+
+    /** 反射调用无参方法（拿不到返回 null）。 */
+    private static Object callNoArg(Object target, String name) {
+        try {
+            return target.getClass().getMethod(name).invoke(target);
+        } catch (Throwable t) {
+            return null;
+        }
+    }
+
+    /** 反射取字段（沿父类往上找，拿不到返回 null）。 */
+    private static Object getField(Object target, String name) {
+        Class<?> c = target.getClass();
+        while (c != null) {
+            try {
+                java.lang.reflect.Field f = c.getDeclaredField(name);
+                f.setAccessible(true);
+                return f.get(target);
+            } catch (Throwable t) {
+                c = c.getSuperclass();
+            }
+        }
+        return null;
     }
 }
