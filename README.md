@@ -71,7 +71,7 @@
 - **日志保存**（`aafm_py/log_saver.py`）：日志页全部内容（聊天/公告/私聊/ActionBar/程序日志）内存缓存，**跨天或关闭程序**时写入 `logs/yyyy_mm_dd_第N次.txt`。
 - **本地接口启动器**（`run_with_api.py`）：不改动本项目其它文件，挂钩 `BotEngine` 开一个本地 HTTP 接口，让网站借用**正在运行的机器人**发消息（`--port` / `--token`）。
 - **QQ 转述增强**：网关框架可切换（默认 **SnowLuma**，可切 **NapCat**）、两者路径/地址/Token **各自独立**（`qq.snowluma` / `qq.napcat`）；SnowLuma 自动从 `config/onebot_*.json` 读取端口与 token，并用**真实 WS 握手逐个探测**选用（修重启后 401）；QQ→MC 与 MC→QQ 方向开关解耦；外置登录/会话服务 5xx·超时**友好提示 + 指数退避**（5s→…→15min，同类提示每 60 秒最多一条）；外置登录请求统一 **20 秒硬超时**（含原先没超时的 `session/join`）。
-- **MIT License**：新增 [`LICENSE`](LICENSE)，README/Mod 元数据统一 MIT。
+- **Apache License 2.0**：新增 [`LICENSE`](LICENSE)（附带明确的**专利授权**，对企业和二次分发更友好），README/Mod 元数据统一为 Apache-2.0。
 - 其他修复：`client.chat is not a function`（未进服时消息排队补发）；高 DPI；玩家资料模板更新；`cryptography` 标为可选依赖。
 
 ### v3.1
@@ -150,7 +150,7 @@
 │  ├─ src/main/java/...   #   zmusic:packet 协议编码 + 网易云搜索 + 点歌逻辑
 │  └─ dist/               #   已构建好的 ZMusicBridge-1.0.0.jar
 ├─ run_with_api.py        # 带本地 HTTP 接口的启动器（供网站借用机器人发消息，可选）
-├─ LICENSE                # MIT
+├─ LICENSE                # Apache-2.0
 ├─ qq_engine.js           # Node 端 OneBot 11 群聊转述引擎（正向/反向 WebSocket）
 ├─ 3rdparty_auth.js       # LittleSkin OAuth 登录/刷新/自动重登
 ├─ msa_auth.js            # 微软账号设备码登录
@@ -318,5 +318,9 @@ npm run login:msa          # 仅执行微软账号登录
 
 ## License
 
-本项目采用 **MIT License** —— 见 [LICENSE](LICENSE)。你可以自由使用、修改、分发（保留版权声明即可）。
-点歌 Mod（`mc-song-mod/`）与 ZMusic 服务端插件（`mc-music-bridge/`）同样以 MIT 授权。
+本项目采用 **Apache License 2.0** —— 见 [LICENSE](LICENSE)。你可以自由使用、修改、分发、商用（保留版权声明与许可声明即可）；
+该协议还包含**明确的专利授权**，并对贡献者署名/变更说明有要求。
+点歌 Mod（`mc-song-mod/`）与 ZMusic 服务端插件（`mc-music-bridge/`）同样以 Apache-2.0 授权。
+
+> 说明：Mod 里内嵌的 MP3 解码库 **JLayer** 是 LGPL 授权的第三方组件（`com.googlecode.soundlibs:jlayer`），
+> 与本项目自身的 Apache-2.0 授权相互独立；二次分发时请一并遵守其许可。

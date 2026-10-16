@@ -84,3 +84,8 @@ ZMusic v5 插件消息通道 `zmusic:packet`，帧 = `"ZMPK"` + 版本字节 `1`
 - 音源目前只有**网易云**。VIP / 版权受限歌曲拿不到直链时会播放失败（客户端会报 `playback_failed`/`audio_url_expired`）。
 - 搜索结果取第一条，偶尔可能是翻唱版本；换个更精确的关键词即可。
 - 需要玩家自己装对应版本的 ZMusic Mod；未装 Mod 的玩家听不到。
+
+## License
+
+Apache License 2.0，见仓库根目录 [LICENSE](../LICENSE)。
+本插件是按 **ZMusic v5 的协议文档自行实现**的（未复制其代码）；ZMusic 本体为 GPL-3.0，与本插件的授权相互独立。

@@ -56,7 +56,7 @@ A "client-less" Minecraft AI player: it never opens the game itself. A GUI drive
 - **Log saving** (`aafm_py/log_saver.py`): every log line (chat / server notices / private messages / action bar / app logs) is buffered and flushed to `logs/yyyy_mm_dd_第N次.txt` on day rollover or app close.
 - **Local API launcher** (`run_with_api.py`): hooks `BotEngine` and exposes a local HTTP endpoint so a website can send messages through the running bot (optional, does not modify other files).
 - **QQ relay improvements**: switchable gateway frameworks (SnowLuma default / NapCat) with **independent** configs; SnowLuma auto-reads port + token from `config/onebot_*.json` and picks a working token by a real WS handshake; QQ↔MC direction toggles decoupled; friendly 5xx/timeout messages with exponential backoff; a hard **20s timeout** on all 3rd-party auth requests.
-- **MIT License**: added [`LICENSE`](LICENSE).
+- **Apache License 2.0**: added [`LICENSE`](LICENSE) (with an explicit patent grant, friendlier for companies and redistribution).
 
 ### v3.1
 
@@ -187,4 +187,10 @@ npm run login:msa          # Microsoft account login only
 
 ## License
 
-MIT
+This project is licensed under the **Apache License 2.0** — see [LICENSE](LICENSE).
+You may use, modify, distribute and use it commercially (just keep the copyright/license notices);
+it also includes an explicit **patent grant** and requires stating significant changes.
+The song mod (`mc-song-mod/`) and the ZMusic plugin (`mc-music-bridge/`) are Apache-2.0 as well.
+
+> Note: the mod bundles **JLayer** (MP3 decoder, `com.googlecode.soundlibs:jlayer`), which is a third-party
+> **LGPL** component — independent from this project's Apache-2.0 license; comply with it when redistributing.

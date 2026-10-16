@@ -116,4 +116,5 @@ powershell -ExecutionPolicy Bypass -File build_all.ps1   # 1.21.1~26.2 全量
 
 ## License
 
-MIT，见仓库根目录 [LICENSE](../LICENSE)。
+Apache License 2.0，见仓库根目录 [LICENSE](../LICENSE)。
+内嵌的 MP3 解码库 **JLayer** 为 LGPL 第三方组件，与本项目的 Apache-2.0 授权独立。

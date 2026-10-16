@@ -10,7 +10,7 @@
   "contact": {
     "homepage": "https://github.com/QingCheng3962/AI-Helper-In-Minecraft"
   },
-  "license": "MIT",
+  "license": "Apache-2.0",
   "environment": "client",
   "entrypoints": {
     "client": [
