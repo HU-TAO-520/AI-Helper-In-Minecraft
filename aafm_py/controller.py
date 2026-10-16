@@ -628,9 +628,47 @@ class Controller:
         text = (text or '').strip()
         if not text:
             return
+        self._remember_sent(text)
         if not self._engine.say(text):
             self._post_ui({'kind': 'log', 'level': 'error',
                            'message': '无法发送（未连接）。'})
+
+    # ------------------------------------------------------------------
+    # 自触发防线：记住「机器人自己发出去的话」，服务器把它广播回来时别再当成新消息
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _norm_line(text: str) -> str:
+        """归一化一行聊天（去掉颜色码/空白，转小写），用于比对「这是不是我自己发过的」。"""
+        t = re.sub(r'§.', '', str(text or ''))
+        t = re.sub(r'&[0-9a-fk-or]', '', t, flags=re.IGNORECASE)
+        t = re.sub(r'\s+', '', t)
+        return t.strip().lower()
+
+    def _remember_sent(self, text: str) -> None:
+        n = self._norm_line(text)
+        if not n:
+            return
+        if not hasattr(self, '_sent_lines'):
+            self._sent_lines: Dict[str, float] = {}
+        self._sent_lines[n] = time.time()
+        if len(self._sent_lines) > 400:
+            for k in sorted(self._sent_lines, key=lambda x: self._sent_lines[x])[:150]:
+                self._sent_lines.pop(k, None)
+
+    def _is_own_echo(self, text: str) -> bool:
+        """这条聊天是不是我自己刚发出去的（15 分钟内、完全一致或明显包含）。"""
+        n = self._norm_line(text)
+        if len(n) < 4:
+            return False
+        now = time.time()
+        for k, ts in getattr(self, '_sent_lines', {}).items():
+            if now - ts > 900:
+                continue
+            if k == n:
+                return True
+            if len(k) >= 6 and len(n) >= 6 and (k in n or n in k):
+                return True
+        return False
 
     # ------------------------------------------------------------------
     # Document -> book and quill (with progress + stop/pause/continue)
@@ -1622,6 +1660,7 @@ class Controller:
             budget = max(40, 250 - len(cmd))
             if len(line) > budget:
                 line = line[:budget]      # 兜底截断（正常不会走到这：上面已按 limit 拆好）
+            self._remember_sent(cmd + line)
             try:
                 if self._engine.say(cmd + line):
                     return True
@@ -1710,6 +1749,27 @@ class Controller:
         after = text[pos + len(trigger):].strip()
         stop_word = (song.stopWord or '').strip()
         who = player or '?'
+
+        # ⓞ 自触发防线①：这句话是不是我自己刚发出去的（服务器把我自己的话广播回来）
+        if self._is_own_echo(text) or self._is_own_echo(after):
+            return False
+        # ⓞ② 自触发防线②：熔断 —— 同一句话几秒内被反复「点」，就是循环的特征，停一会儿
+        loop_key = self._song_key(after)
+        now_l = time.time()
+        if (loop_key and loop_key == getattr(self, '_song_loop_key', '')
+                and now_l - getattr(self, '_song_loop_at', 0.0) < 8):
+            self._song_loop_n = getattr(self, '_song_loop_n', 0) + 1
+        else:
+            self._song_loop_key, self._song_loop_n = loop_key, 1
+        self._song_loop_at = now_l
+        if getattr(self, '_song_loop_n', 0) >= 3:
+            self._song_loop_n = 0
+            self._song_loop_until = now_l + 60
+            self._post_ui({'kind': 'log', 'level': 'warn',
+                           'message': '[点歌] 检测到自触发循环（同一句话连点多次）→ 暂停点歌 60 秒'})
+            return False
+        if now_l < getattr(self, '_song_loop_until', 0.0):
+            return False
 
         # 停止指令：[点歌]停止 —— **只清这个玩家自己的**（谁点谁听，别把别人的歌关了）
         if stop_word and after.lower() == stop_word.lower():
@@ -2542,6 +2602,7 @@ class Controller:
                 self._schedule_reconnect(kicked=False)
         elif event == 'chatSent':
             text = ev.get('text', '')
+            self._remember_sent(text)      # 自触发防线：记下自己发过的话
             if text in self._qq_pending_relays:
                 self._qq_pending_relays.remove(text)
                 self._post_ui({'kind': 'log', 'level': 'qq', 'message': '» ' + text})
@@ -2592,6 +2653,15 @@ class Controller:
 
     def _post_ui(self, ev: Dict[str, Any]) -> None:
         if isinstance(ev, dict) and ev.get('kind') == 'log':
+            # 机器人自己写的、带触发词的日志 → 也记成「自己说过的话」：
+            # 万一它被转到游戏里（日志转发/AI 复述），服务器广播回来时就不会再当成新点歌。
+            try:
+                msg = str(ev.get('message') or '')
+                trigger = (self.config.song.trigger or '').strip()
+                if trigger and trigger in msg:
+                    self._remember_sent(msg)
+            except Exception:  # noqa: BLE001
+                pass
             try:
                 self._maybe_forward_log_to_mc(ev.get('level'), ev.get('message'))
             except Exception:  # noqa: BLE001
@@ -2645,6 +2715,12 @@ class Controller:
         text = re.sub(r'\s+', ' ', str(message or '')).strip()
         if not text:
             return
+        # ⚠ 千万别把「带点歌触发词的日志」转到游戏里：那等于让机器人自己喊一句 [点歌]…，
+        #    服务器广播回来又被当成新的点歌 → 自触发死循环（实测能把机器人刷到被踢）。
+        trigger = (self.config.song.trigger or '').strip()
+        for word in ([trigger] + self._trigger_aliases(trigger)) if trigger else []:
+            if word and word in text:
+                return
         tmpl = cfg.format or '&7Log -> &c{log}'
         try:
             out = tmpl.format(log=text)
