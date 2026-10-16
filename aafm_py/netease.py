@@ -17,6 +17,22 @@ BASE_COOKIE = 'os=pc; appver=2.9.7; channel=netease;'
 _ID_IN_URL = re.compile(r'[?&]id=(\d{4,})')
 _PURE_ID = re.compile(r'^\d{6,}$')
 
+# 搜索缓存 + 请求节流（被网易云限流的概率因此小很多）
+_SEARCH_CACHE: Dict[str, Tuple[float, Optional[Dict[str, Any]]]] = {}
+_SEARCH_TTL = 300.0          # 同一关键词 5 分钟内复用结果
+_SEARCH_MIN_GAP = 0.8        # 两次搜索之间至少隔 0.8 秒
+_LAST_SEARCH_AT = 0.0
+
+# 最近一次接口请求失败的原因（给 UI 提示用）：'' / HTTP 403 / 搜索无结果 / 异常…
+LAST_ERROR = ''
+
+
+class SearchUnavailable(RuntimeError):
+    """网易云接口请求失败（网络挂了 / 被限流）—— 跟「真的没这首歌」区分开。
+
+    以前两者都返回 None，UI 一律显示「没找到「歌名」」，很容易误判成歌名问题。
+    """
+
 
 def _headers(cookie: str = '') -> Dict[str, str]:
     cookie = (cookie or '').strip()
@@ -29,13 +45,16 @@ def _headers(cookie: str = '') -> Dict[str, str]:
 
 
 def _get_json(url: str, cookie: str = '', timeout: float = 10.0) -> Optional[Dict[str, Any]]:
+    global LAST_ERROR
     try:
         import httpx
         r = httpx.get(url, headers=_headers(cookie), timeout=timeout, follow_redirects=True)
         if r.status_code != 200:
+            LAST_ERROR = 'HTTP %s' % r.status_code
             return None
         return r.json()
-    except Exception:  # noqa: BLE001
+    except Exception as e:  # noqa: BLE001
+        LAST_ERROR = repr(e)
         return None
 
 
@@ -83,24 +102,54 @@ def _song_from_obj(obj: Dict[str, Any]) -> Optional[Dict[str, Any]]:
 
 
 def search(keyword: str, cookie: str = '') -> Optional[Dict[str, Any]]:
-    """搜索第一条命中（返回 id/title/artists/album）。"""
+    """搜索第一条命中（返回 id/title/artists/album）。
+
+    ① 5 分钟缓存（同一首歌短时间内反复点不重复打接口，减少被限流的概率）；
+    ② 每次请求之间至少间隔 0.8 秒；
+    ③ 请求失败**自动重试**（换一个搜索端点 + 退避），原因写进 ``LAST_ERROR`` ——
+       「请求失败（限流/网络）」和「真没这首歌」要分得清，不然一律显示成「没找到」很难排查。
+    """
+    global LAST_ERROR, _LAST_SEARCH_AT
     kw = (keyword or '').strip()
     if not kw:
         return None
+    import time as _t
+    import urllib.parse
+    cache_key = kw.lower() + '|' + str(abs(hash(cookie)))
+    hit = _SEARCH_CACHE.get(cache_key)
+    if hit and _t.time() - hit[0] < _SEARCH_TTL:
+        return hit[1]
+    wait = _SEARCH_MIN_GAP - (_t.time() - _LAST_SEARCH_AT)
+    if wait > 0:
+        _t.sleep(wait)
+    _LAST_SEARCH_AT = _t.time()
+    q = urllib.parse.quote(kw)
+    urls = [
+        BASE + '/api/search/get/web?s=' + q + '&type=1&offset=0&total=true&limit=1',
+        BASE + '/api/search/get/?s=' + q + '&type=1&offset=0&total=true&limit=1',
+    ]
+    LAST_ERROR = ''
     try:
-        import urllib.parse
-        url = (BASE + '/api/search/get/web?s=' + urllib.parse.quote(kw) +
-               '&type=1&offset=0&total=true&limit=1')
-        data = _get_json(url, cookie)
-        if not data:
-            return None
-        result = data.get('result') or {}
-        songs = result.get('songs') or []
-        if not songs:
-            return None
-        return _song_from_obj(songs[0])
-    except Exception:  # noqa: BLE001
+        for attempt in range(3):
+            # ⚠ 搜索**故意不带会员 Cookie**：实测带上 MUSIC_U 时网易云会返回**空结果**
+            #   （会话被风控/限流），而匿名搜索稳定正常 —— 搜索本来就是公开接口，
+            #   Cookie 只在「取播放直链 / 校验登录」时才需要。最后一次重试再带上 Cookie 兜底。
+            use_cookie = cookie if attempt == 2 else ''
+            data = _get_json(urls[attempt % len(urls)], use_cookie)
+            if data:
+                songs = (data.get('result') or {}).get('songs') or []
+                song = _song_from_obj(songs[0]) if songs else None
+                if song is None and attempt == 0 and cookie:
+                    continue        # 匿名没结果？再试一次（可能是瞬时抽风）
+                _SEARCH_CACHE[cache_key] = (_t.time(), song)
+                if song is None:
+                    LAST_ERROR = '搜索无结果'
+                return song
+            _t.sleep(0.5 * (attempt + 1))
+    except Exception as e:  # noqa: BLE001
+        LAST_ERROR = repr(e)
         return None
+    return None
 
 
 def by_id(song_id: str, cookie: str = '') -> Optional[Dict[str, Any]]:
@@ -306,11 +355,17 @@ def resolve(text: str, cookie: str = '') -> Optional[Dict[str, Any]]:
     else:
         song = search(raw, cookie)
     if song is None:
+        if LAST_ERROR and LAST_ERROR != '搜索无结果':
+            raise SearchUnavailable(LAST_ERROR)
         return None
     url, trial, fee, duration = player_url(song['id'], cookie)
     note = None
     if not url:
-        note = '该歌曲需要网易云会员（请在机器人的「点歌」页登录）' if fee > 0 else '该歌曲暂时没有可播放的地址'
+        if LAST_ERROR and LAST_ERROR != '搜索无结果':
+            note = '获取播放地址失败（可能被限流，稍等一下再试）：' + LAST_ERROR
+        else:
+            note = ('该歌曲需要网易云会员（请在机器人的「点歌」页登录）' if fee > 0
+                    else '该歌曲暂时没有可播放的地址')
     return {
         'id': song['id'],
         'title': song.get('title') or raw,
