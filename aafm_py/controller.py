@@ -5,6 +5,7 @@ import base64
 import json
 import os
 import queue
+import random
 import re
 import socket
 import subprocess
@@ -15,6 +16,7 @@ from typing import Any, Dict, List, Optional
 
 from .ai_player import AiPlayer, _BRACKET_LITERAL, _compile_trigger, _split_top_level_commas
 from .affinity import AffinityStore
+from .dailydb import DailyDB
 from . import docbook
 from .bot_engine import BotEngine, BASE_DIR
 from .config import (AiPlayerConfig, AppConfig, BOOK_PROGRESS_FILE,
@@ -163,6 +165,10 @@ class Controller:
         self.log_saver = LogSaver(BASE_DIR)
         # 好感度（[触发词]好感度 查询；聊天/点歌慢慢涨）
         self.affinity = AffinityStore(os.path.join(BASE_DIR, 'affinity.json'))
+        # 每日数据（SQLite）：当日幸运值 + 当日签到。重启不会改写；
+        # 跨天自动「备份 → 删除 → 重建」，旧库存到 db_backup/db_backup_<时间>.db
+        self.daily = DailyDB(os.path.join(BASE_DIR, 'daily.db'),
+                             os.path.join(BASE_DIR, 'db_backup'))
 
         self._worker: Optional[threading.Thread] = None
         self._running = False
@@ -1762,6 +1768,9 @@ class Controller:
             if head_low in ('今日幸运值', '幸运值', '今日幸运', '幸运', 'lucky'):
                 self._reply_lucky(player)
                 return True
+            if head_low in ('签到', '打卡', 'checkin', 'check-in', '每日签到'):
+                self._do_checkin(player)
+                return True
         return False
 
     # ------------------------------------------------------------------
@@ -1833,16 +1842,19 @@ class Controller:
                                   f'{player} 点的）'})
 
     # ------------------------------------------------------------------
-    # 今日幸运值（同一玩家同一天固定，隔天自动刷新）
+    # 今日幸运值（当天第一次查询时随机定下来，存进 daily.db → 重启不变）
     # ------------------------------------------------------------------
     def _lucky_value(self, player: str, date_str: Optional[str] = None) -> int:
-        """用「日期 + 玩家名」做种子，得到 1~luckMax 的固定值（不需要存盘）。"""
-        import hashlib
+        """取玩家今天的幸运值；库里没有就随机定一个存起来（当天不再变）。"""
         cfg = self._misc()
         mx = max(2, int(cfg.luckMax or 100))
-        day = date_str or time.strftime('%Y-%m-%d', time.localtime())
-        raw = (day + '|' + str(player or '').strip().lower() + '|' + str(mx)).encode('utf-8')
-        return int(hashlib.md5(raw).hexdigest(), 16) % mx + 1
+        try:
+            return int(self.daily.get_lucky(player, mx, date_str))
+        except Exception:  # noqa: BLE001
+            import hashlib
+            day = date_str or time.strftime('%Y-%m-%d', time.localtime())
+            raw = (day + '|' + str(player or '').strip().lower() + '|' + str(mx)).encode('utf-8')
+            return int(hashlib.md5(raw).hexdigest(), 16) % mx + 1
 
     def _reply_lucky(self, player: str) -> None:
         cfg = self._misc()
@@ -1869,6 +1881,77 @@ class Controller:
                 .replace('{comment}', tail)
                 .replace('{date}', time.strftime('%Y-%m-%d', time.localtime())))
         self.send_chat(text)
+
+    # ------------------------------------------------------------------
+    # 每日签到（[提示词]签到）：奖励金钱 / 物品，用配好的两条命令发出去
+    # ------------------------------------------------------------------
+    def _do_checkin(self, player: str) -> None:
+        cfg = self._misc()
+        if not cfg.checkinEnabled:
+            self.send_chat(cfg.checkinOffText.replace('{player}', player))
+            return
+        info = self.daily.sign(player)
+        if not info.get('ok'):
+            text = (cfg.checkinRepeatText
+                    .replace('{player}', player)
+                    .replace('{streak}', str(info.get('streak') or 0))
+                    .replace('{total}', str(info.get('total') or 0)))
+            self.send_chat(text)
+            return
+        streak = int(info.get('streak') or 1)
+        total = int(info.get('total') or 1)
+        # 金钱：在 [最少, 最多] 里随机，再按连签天数加额外奖励
+        lo = int(cfg.checkinMoneyMin or 0)
+        hi = int(cfg.checkinMoneyMax or 0)
+        money = random.randint(min(lo, hi), max(lo, hi))
+        if int(cfg.checkinStreakBonus or 0) > 0:
+            money += int(cfg.checkinStreakBonus) * max(0, streak - 1)
+        item = (cfg.checkinItem or '').strip()
+        count = int(cfg.checkinItemCount or 0)
+        if not item or count <= 0:
+            item, count = '', 0
+        # 两条发放命令：金钱一行、物品一行
+        done_money = done_item = False
+        if money > 0 and (cfg.checkinMoneyCmd or '').strip():
+            done_money = self._run_reward_cmd(cfg.checkinMoneyCmd, player, money, item, count)
+        if item:
+            done_item = self._run_reward_cmd(cfg.checkinItemCmd, player, money, item, count)
+        items_txt = f'{item} x{count}' if item else ''
+        text = (cfg.checkinText
+                .replace('{player}', player)
+                .replace('{money}', str(money))
+                .replace('{value}', str(money))
+                .replace('{item}', item)
+                .replace('{count}', str(count))
+                .replace('{items}', f' + {items_txt}' if items_txt else '')
+                .replace('{streak}', str(streak))
+                .replace('{total}', str(total)))
+        self.send_chat(text)
+        self._post_ui({'kind': 'log', 'level': 'info',
+                       'message': f'[签到] {player} 连签 {streak} 天（累计 {total} 次）：'
+                                  f'金钱 {money}{"、" + items_txt if items_txt else ""}'
+                                  f'{"（奖励命令已发出）" if (done_money or done_item) else ""}'})
+
+    def _run_reward_cmd(self, template: str, player: str, value: int,
+                        item: str, count: int) -> bool:
+        """按模板发一条奖励命令（缺 ``/`` 会自动补上，按整条命令算长度）。"""
+        cmd = (str(template or '')
+               .replace('{player}', str(player))
+               .replace('{value}', str(value))
+               .replace('{money}', str(value))
+               .replace('{item}', item or '')
+               .replace('{count}', str(count)))
+        cmd = ' '.join(cmd.split())
+        if not cmd:
+            return False
+        if not cmd.startswith('/'):
+            cmd = '/' + cmd
+        cmd = cmd[:250]
+        self._remember_sent(cmd)          # 自触发防线
+        try:
+            return bool(self._engine.say(cmd))
+        except Exception:  # noqa: BLE001
+            return False
 
     # ------------------------------------------------------------------
     # 群发私聊：把一句话 /msg 给所有在线玩家（GUI「杂项」页的输入框 + 按钮）
@@ -1978,6 +2061,15 @@ class Controller:
         misc = self._misc()
         vcount = int(misc.videoCount or 5)
         vcool = int(misc.videoCooldownSeconds or 30)
+        if misc.checkinEnabled:
+            reward = '金币'
+            if (misc.checkinItem or '').strip() and int(misc.checkinItemCount or 0) > 0:
+                reward += f' 和 {misc.checkinItem} x{misc.checkinItemCount}'
+            if int(misc.checkinStreakBonus or 0) > 0:
+                reward += '（连签更多）'
+            checkin_line = f'· 每日签到：{t}签到 —— 每天一次，可领 {reward}'
+        else:
+            checkin_line = '· 每日签到：暂时关闭中'
         lines = [
             f'你好 {name}！我是服里的 AI 搭子，可以聊天、点歌、查好感度。',
             f'· 找我聊天：想说的话前面带上提示词（{trigger_hint}）',
@@ -1986,6 +2078,7 @@ class Controller:
             f'· 好感度：{t}好感度 看自己的；{t}好感度 玩家名 看别人的',
             f'· 视频推荐 / 今日幸运值：{t}视频推荐（{misc.source_name()}前 {vcount} 条，'
             f'全服 {vcool} 秒冷却）、{t}今日幸运值（每天固定一个）',
+            checkin_line,
             '· 其它：/tpa 玩家、/home、/sethome、/sit、/lay、/spin 直接跟我说就行',
             '· 完整说明见 HELP.md（或问服主）',
         ]
@@ -2345,6 +2438,17 @@ class Controller:
         self._song_next_at = 0.0
         self._post_ui({'kind': 'log', 'level': 'song',
                        'message': f'[点歌] 已清空播放队列（{n} 首）'})
+
+    def _maybe_daily_rotate(self) -> None:
+        """跨天检查：daily.db 备份 → 删除 → 重建（幸运值 / 签到按天重置）。"""
+        try:
+            info = self.daily.ensure_day()
+        except Exception:  # noqa: BLE001
+            return
+        if info.get('rotated'):
+            self._post_ui({'kind': 'log', 'level': 'info',
+                           'message': '新的一天：每日数据已重置，旧库备份到 '
+                                      + str(info.get('backup') or 'db_backup/')})
 
     def _song_tick(self) -> None:
         """每秒调用：当前放完就播下一首；开了「立刻插播」就新歌一到马上放（打断当前这首）。"""
@@ -2835,6 +2939,7 @@ class Controller:
                 self._maybe_proactive_reconnect()
                 self._maybe_auto_lobby()
                 self._maybe_online_check()
+                self._maybe_daily_rotate()
                 try:
                     self._song_tick()
                 except Exception:  # noqa: BLE001

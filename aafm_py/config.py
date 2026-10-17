@@ -812,6 +812,25 @@ class MiscConfig:
     # 文案：{player} 玩家、{value} 幸运值、{max} 最大值、{comment} 评语、{date} 日期
     luckText: str = '【今日幸运值】{player}：{value}/{max} — {comment}（明天 0 点刷新）'
 
+    # ---------------- 每日签到 ----------------
+    checkinEnabled: bool = True
+    # 金钱奖励：{value} 会在 [最少, 最多] 里随机（两个写一样就是固定值）
+    checkinMoneyMin: int = 100
+    checkinMoneyMax: int = 300
+    # 物品奖励：留空 = 不给物品；{item} 与 {count}
+    checkinItem: str = ''
+    checkinItemCount: int = 1
+    # 连签每多一天，额外多给多少金钱（0 = 不额外给）
+    checkinStreakBonus: int = 0
+    # 发放命令（两行，各一条）：{player} 玩家、{value} 金钱、{item} 物品 id、{count} 物品数量
+    checkinMoneyCmd: str = 'eco give {player} {value}'
+    checkinItemCmd: str = 'give {player} {item} {count}'
+    # 文案：{player} 玩家、{money}/{value} 金钱、{item} 物品、{count} 数量、
+    #       {items} 物品描述（没物品时为空）、{streak} 连签天数、{total} 累计次数
+    checkinText: str = '【签到】{player} 签到成功！获得 {money} 金币{items}（连续 {streak} 天，累计 {total} 次）'
+    checkinRepeatText: str = '【签到】{player} 今天已经签过啦，明天再来～（已连续 {streak} 天）'
+    checkinOffText: str = '【签到】签到功能没开（服主可在「杂项」页打开）'
+
     # ---------------- 群发私聊（/msg 所有在线玩家）----------------
     # 每两个玩家之间的间隔（秒），防止刷太快被服务器当刷屏踢下线
     massGapSeconds: float = 0.5
@@ -835,6 +854,25 @@ class MiscConfig:
         self.luckMax = _clamp_int(self.luckMax, 10, 1000)
         self.luckText = (str(self.luckText or '').strip()
                          or '【今日幸运值】{player}：{value}/{max} — {comment}（明天 0 点刷新）')
+        self.checkinEnabled = bool(self.checkinEnabled)
+        self.checkinMoneyMin = _clamp_int(self.checkinMoneyMin, 0, 10_000_000)
+        self.checkinMoneyMax = _clamp_int(self.checkinMoneyMax, 0, 10_000_000)
+        if self.checkinMoneyMax < self.checkinMoneyMin:
+            self.checkinMoneyMin, self.checkinMoneyMax = self.checkinMoneyMax, self.checkinMoneyMin
+        self.checkinItem = str(self.checkinItem or '').strip()
+        self.checkinItemCount = _clamp_int(self.checkinItemCount, 0, 9999)
+        self.checkinStreakBonus = _clamp_int(self.checkinStreakBonus, 0, 1_000_000)
+        self.checkinMoneyCmd = (str(self.checkinMoneyCmd or '').strip()
+                                or 'eco give {player} {value}')
+        self.checkinItemCmd = (str(self.checkinItemCmd or '').strip()
+                               or 'give {player} {item} {count}')
+        self.checkinText = (str(self.checkinText or '').strip()
+                            or '【签到】{player} 签到成功！获得 {money} 金币{items}'
+                               '（连续 {streak} 天，累计 {total} 次）')
+        self.checkinRepeatText = (str(self.checkinRepeatText or '').strip()
+                                  or '【签到】{player} 今天已经签过啦，明天再来～（已连续 {streak} 天）')
+        self.checkinOffText = (str(self.checkinOffText or '').strip()
+                               or '【签到】签到功能没开（服主可在「杂项」页打开）')
         self.massGapSeconds = _clamp_float(self.massGapSeconds, 0.0, 10.0)
         self.massSkipSelf = bool(self.massSkipSelf)
 

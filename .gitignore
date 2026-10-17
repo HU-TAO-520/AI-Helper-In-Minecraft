@@ -23,3 +23,6 @@ logs/
 /mc-song-mod/dist/
 /mc-music-bridge/dist/
 affinity.json
+# 每日数据（幸运值 / 签到）：跨天自动备份到 db_backup/
+daily.db
+/db_backup/

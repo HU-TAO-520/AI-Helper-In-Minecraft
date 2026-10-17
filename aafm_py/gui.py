@@ -921,7 +921,8 @@ class AiPlayerGUI:
         self.var_misc_luck_max = tk.StringVar(value='100')
         ttk.Entry(luck, textvariable=self.var_misc_luck_max, width=8).grid(
             row=1, column=1, sticky='w', padx=4, pady=3)
-        ttk.Label(luck, text='同一天固定（日期 + 玩家名算出来），隔天 0 点自动刷新，不用存盘',
+        ttk.Label(luck, text='当天第一次查询时随机定下来，存进 daily.db，重启程序也不会变；'
+                             '跨天自动备份到 db_backup/ 后重置',
                   foreground='#888888').grid(row=1, column=2, sticky='w', padx=4)
         ttk.Label(luck, text='回复文案').grid(row=2, column=0, sticky='w', padx=4, pady=3)
         self.var_misc_luck_text = tk.StringVar()
@@ -931,6 +932,67 @@ class AiPlayerGUI:
                              '{comment} 评语（按分数自动给）、{date} 日期',
                   foreground='#888888').grid(row=3, column=1, columnspan=2, sticky='w', padx=4)
         luck.columnconfigure(1, weight=1)
+
+        # ---------------- 每日签到 ----------------
+        ck = ttk.LabelFrame(
+            sc.inner, text='每日签到（玩家发 [提示词]签到 → 每天一次，发奖励）', padding=8)
+        ck.pack(fill='x', pady=(8, 0))
+        self.var_misc_checkin_enabled = tk.BooleanVar(value=True)
+        ttk.Checkbutton(ck, text='开启「每日签到」', variable=self.var_misc_checkin_enabled).grid(
+            row=0, column=0, columnspan=4, sticky='w', padx=4, pady=3)
+
+        ttk.Label(ck, text='金币').grid(row=1, column=0, sticky='w', padx=4, pady=3)
+        self.var_misc_checkin_money_min = tk.StringVar(value='100')
+        ttk.Entry(ck, textvariable=self.var_misc_checkin_money_min, width=8).grid(
+            row=1, column=1, sticky='w', padx=4, pady=3)
+        ttk.Label(ck, text='～').grid(row=1, column=2, sticky='w')
+        self.var_misc_checkin_money_max = tk.StringVar(value='300')
+        ttk.Entry(ck, textvariable=self.var_misc_checkin_money_max, width=8).grid(
+            row=1, column=3, sticky='w', padx=4, pady=3)
+        ttk.Label(ck, text='最少～最多，随机给（两个填一样就是固定值）',
+                  foreground='#888888').grid(row=1, column=4, sticky='w', padx=4)
+
+        ttk.Label(ck, text='连签加成').grid(row=2, column=0, sticky='w', padx=4, pady=3)
+        self.var_misc_checkin_streak_bonus = tk.StringVar(value='0')
+        ttk.Entry(ck, textvariable=self.var_misc_checkin_streak_bonus, width=8).grid(
+            row=2, column=1, sticky='w', padx=4, pady=3)
+        ttk.Label(ck, text='每多连签一天，额外多给多少金币（0 = 不额外给）',
+                  foreground='#888888').grid(row=2, column=2, columnspan=3, sticky='w', padx=4)
+
+        ttk.Label(ck, text='物品').grid(row=3, column=0, sticky='w', padx=4, pady=3)
+        self.var_misc_checkin_item = tk.StringVar()
+        ck_item = ttk.Entry(ck, textvariable=self.var_misc_checkin_item, width=24)
+        ck_item.grid(row=3, column=1, columnspan=2, sticky='we', padx=4, pady=3)
+        ttk.Label(ck, text='数量').grid(row=3, column=3, sticky='e', padx=(8, 4))
+        self.var_misc_checkin_item_count = tk.StringVar(value='1')
+        ttk.Entry(ck, textvariable=self.var_misc_checkin_item_count, width=6).grid(
+            row=3, column=4, sticky='w', padx=4, pady=3)
+        ttk.Label(ck, text='物品 id，例：diamond / minecraft:diamond（留空 = 只发金币）',
+                  foreground='#888888').grid(row=4, column=1, columnspan=4, sticky='w', padx=4)
+
+        self.var_misc_checkin_money_cmd = tk.StringVar()
+        self.var_misc_checkin_item_cmd = tk.StringVar()
+        self.var_misc_checkin_text = tk.StringVar()
+        self.var_misc_checkin_repeat = tk.StringVar()
+        self.var_misc_checkin_off = tk.StringVar()
+        self._entry(ck, 5, '发金币命令', self.var_misc_checkin_money_cmd,
+                    hint='例：eco give {player} {value} / money give {player} {value}')
+        self._entry(ck, 6, '发物品命令', self.var_misc_checkin_item_cmd,
+                    hint='例：give {player} {item} {count}')
+        ttk.Label(ck, text='命令里可用 {player} 玩家、{value}（= {money}）金币、{item} 物品、{count} 数量；'
+                           '开头不用写 /，会自动补',
+                  foreground='#888888').grid(row=7, column=1, columnspan=4, sticky='w', padx=4)
+        self._entry(ck, 8, '签到成功文案', self.var_misc_checkin_text)
+        ttk.Label(ck, text='可用 {player}、{money}/{value} 金币、{item}、{count}、'
+                           '{items} 物品描述（没物品时为空）、{streak} 连签天数、{total} 累计次数',
+                  foreground='#888888').grid(row=9, column=1, columnspan=4, sticky='w', padx=4)
+        self._entry(ck, 10, '今天已签文案', self.var_misc_checkin_repeat,
+                    hint='可用 {player}、{streak}、{total}')
+        self._entry(ck, 11, '功能关闭文案', self.var_misc_checkin_off,
+                    hint='没开签到时回复的话，可用 {player}')
+        ttk.Label(ck, text='连签天数 / 累计次数存在 daily.db，重启程序不会丢；跨天自动备份到 db_backup/ 后重置当天记录',
+                  foreground='#888888').grid(row=12, column=1, columnspan=4, sticky='w', padx=4, pady=(4, 0))
+        ck.columnconfigure(1, weight=1)
 
         # ---------------- 群发私聊 ----------------
         mass = ttk.LabelFrame(
@@ -2249,6 +2311,17 @@ class AiPlayerGUI:
             self.var_misc_luck_enabled.set(bool(misc.luckEnabled))
             self.var_misc_luck_max.set(str(misc.luckMax))
             self.var_misc_luck_text.set(misc.luckText)
+            self.var_misc_checkin_enabled.set(bool(misc.checkinEnabled))
+            self.var_misc_checkin_money_min.set(str(misc.checkinMoneyMin))
+            self.var_misc_checkin_money_max.set(str(misc.checkinMoneyMax))
+            self.var_misc_checkin_streak_bonus.set(str(misc.checkinStreakBonus))
+            self.var_misc_checkin_item.set(misc.checkinItem or '')
+            self.var_misc_checkin_item_count.set(str(misc.checkinItemCount))
+            self.var_misc_checkin_money_cmd.set(misc.checkinMoneyCmd)
+            self.var_misc_checkin_item_cmd.set(misc.checkinItemCmd)
+            self.var_misc_checkin_text.set(misc.checkinText)
+            self.var_misc_checkin_repeat.set(misc.checkinRepeatText)
+            self.var_misc_checkin_off.set(misc.checkinOffText)
             self.var_misc_mass_gap.set(f'{float(misc.massGapSeconds):g}')
             self.var_misc_mass_skipself.set(bool(misc.massSkipSelf))
         if hasattr(self, '_netease_status'):
@@ -2541,6 +2614,17 @@ class AiPlayerGUI:
         misc.luckEnabled = bool(self.var_misc_luck_enabled.get())
         misc.luckMax = self._parse_int(self.var_misc_luck_max.get(), 100)
         misc.luckText = self.var_misc_luck_text.get().strip()
+        misc.checkinEnabled = bool(self.var_misc_checkin_enabled.get())
+        misc.checkinMoneyMin = self._parse_int(self.var_misc_checkin_money_min.get(), 100)
+        misc.checkinMoneyMax = self._parse_int(self.var_misc_checkin_money_max.get(), 300)
+        misc.checkinStreakBonus = self._parse_int(self.var_misc_checkin_streak_bonus.get(), 0)
+        misc.checkinItem = self.var_misc_checkin_item.get().strip()
+        misc.checkinItemCount = self._parse_int(self.var_misc_checkin_item_count.get(), 1)
+        misc.checkinMoneyCmd = self.var_misc_checkin_money_cmd.get().strip()
+        misc.checkinItemCmd = self.var_misc_checkin_item_cmd.get().strip()
+        misc.checkinText = self.var_misc_checkin_text.get().strip()
+        misc.checkinRepeatText = self.var_misc_checkin_repeat.get().strip()
+        misc.checkinOffText = self.var_misc_checkin_off.get().strip()
         misc.massGapSeconds = self._parse_float(self.var_misc_mass_gap.get(), 0.5)
         misc.massSkipSelf = bool(self.var_misc_mass_skipself.get())
         misc.validate()

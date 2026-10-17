@@ -11,14 +11,14 @@
    - 需要让 tag 指向新提交时用：`git tag -f <tag>` + `git push -f origin <tag>`（强制更新，不会动 Release）。
    - 历史事故：`git tag -d` + 重新创建导致 GitHub 上已有的 v3.2.0 Release 消失/变草稿。
 3. **构建产物（jar）不进仓库**：`mc-song-mod/dist/`、`mc-music-bridge/dist/` 已在 `.gitignore`，发布走 GitHub Releases。
-4. 提交前扫一眼 `git status`：不要提交 `config.json`（含 API Key / Cookie）、`affinity.json`、`logs/`、`*.rar`、`node_modules/`、`NapCat/`、`.gradle/`、`build/`。
+4. 提交前扫一眼 `git status`：不要提交 `config.json`（含 API Key / Cookie）、`affinity.json`、`daily.db`、`db_backup/`、`logs/`、`*.rar`、`node_modules/`、`NapCat/`、`.gradle/`、`build/`。
 5. 提交信息用中文、一句主题 + 可选要点，风格参考 `git log`。
 
 ## 二、项目结构（速查）
 
 | 路径 | 内容 |
 | --- | --- |
-| `aafm_py/` | Python 端：`gui.py`（tkinter 多标签页）、`controller.py`（事件分发 / 点歌 / 好感度 / 命令 / 群发）、`ai_player.py`（LLM 对话）、`netease.py`（网易云）、`bilibili.py`（视频推荐抓取）、`affinity.py`（好感度存取）、`docbook.py` + `log_saver.py` |
+| `aafm_py/` | Python 端：`gui.py`（tkinter 多标签页）、`controller.py`（事件分发 / 点歌 / 好感度 / 命令 / 群发）、`ai_player.py`（LLM 对话）、`netease.py`（网易云）、`bilibili.py`（视频推荐抓取）、`affinity.py`（好感度存取）、`dailydb.py`（每日数据 SQLite：当天幸运值 / 签到 + 跨天备份重建）、`docbook.py` + `log_saver.py` |
 | `bot_engine.js` / `qq_engine.js` | Node 端：mineflayer 无头引擎 / OneBot 11 QQ 转述 |
 | `mc-song-mod/` | 客户端点歌 Mod（Fabric **1.21.1 ~ 26.2**）：`src/main`（共用）+ `src/legacy`（1.21.x，mojmap + 重映射 Loom，含界面）+ `src/modern`（26.x，无界面，Java 25） |
 | `mc-music-bridge/` | 服务端插件（可选，ZMusic v5 协议） |
@@ -61,3 +61,6 @@ powershell -ExecutionPolicy Bypass -File build_all.ps1
 - 好感度默认：聊天 +1 / 5 分钟、点歌 +2 / 1 分钟、每日首次 +1；数据在 `affinity.json`。
 - 视频推荐默认**发公屏**、来源**番剧追番榜**、**全服共用** 30 秒冷却；冷却过后再点要**换一批新的**（先避开刚推过的 id）。文案都在「杂项」页。
 - 群发私聊（GUI「杂项」页）逐个 `/msg`，每个玩家之间有间隔（默认 0.5 秒），别调太小（会被当刷屏踢）；自触发防线照旧要记 `_remember_sent`。
+- 「每日数据」一律走 `aafm_py/dailydb.py`（SQLite `daily.db`）：当天幸运值**第一次查询时随机定下来就落库**（别再用「日期+名字」现算，重启会变），签到记录也在这里。跨天由 `ensure_day()` 做「备份 → 删除 → 重建」，旧库进 `db_backup/db_backup_<时间>.db`，`player_stats`（连签/累计）要带到新库，不然连签会断。`tick` 里每秒调一次 `_maybe_daily_rotate()`。
+- 每日签到（`[提示词]签到`）默认：金币在 `[最少, 最多]` 随机 + 连签加成，物品默认不给；发奖励靠配置里那**两行命令**（`{player} {value} {item} {count}`），命令不写 `/` 会自动补，长度按整条命令算（≤250）。
+- 「今日幸运值 / 视频推荐 / 签到 / 帮助 / 好感度」都认**提示词**（`ai_config.triggerRegex`），不是 `[点歌]`。
