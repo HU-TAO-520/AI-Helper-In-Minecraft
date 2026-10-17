@@ -14,6 +14,7 @@ import urllib.parse
 from typing import Any, Dict, List, Optional
 
 from .ai_player import AiPlayer
+from .affinity import AffinityStore
 from . import docbook
 from .bot_engine import BotEngine, BASE_DIR
 from .config import (AiPlayerConfig, AppConfig, BOOK_PROGRESS_FILE,
@@ -153,6 +154,8 @@ class Controller:
         self._public_base_cache = ''
 
         self.log_saver = LogSaver(BASE_DIR)
+        # 好感度（[触发词]好感度 查询；聊天/点歌慢慢涨）
+        self.affinity = AffinityStore(os.path.join(BASE_DIR, 'affinity.json'))
 
         self._worker: Optional[threading.Thread] = None
         self._running = False
@@ -398,6 +401,7 @@ class Controller:
             log=lambda m: self._post_ui({'kind': 'log', 'level': 'ai', 'message': m}),
             error=lambda m: self._post_ui({'kind': 'log', 'level': 'error', 'message': m}),
             roster=self.roster,
+            on_reply=self._on_ai_replied,
         )
         if self._bot_username:
             self.ai_player.set_bot_username(self._bot_username)
@@ -1672,6 +1676,118 @@ class Controller:
         self.send_chat(line[:250])
         return False
 
+    # ------------------------------------------------------------------
+    # 通用指令：[触发词]帮助 / [触发词]好感度
+    # （[触发词] = 机器人 AI 的触发词或点歌触发词，例如 [DiaoHelper]帮助 / [点歌]好感度）
+    # ------------------------------------------------------------------
+    def _bot_command_words(self) -> List[str]:
+        """可用于触发「帮助/好感度」的词：AI 触发词 + 点歌触发词。"""
+        words: List[str] = []
+        try:
+            if self.ai_player is not None:
+                for part in str(getattr(self.ai_player.config, 'triggerRegex', '') or '').split(','):
+                    part = part.strip()
+                    if part and part not in words:
+                        words.append(part)
+        except Exception:  # noqa: BLE001
+            pass
+        t = (self.config.song.trigger or '').strip()
+        if t and t not in words:
+            words.append(t)
+        return words
+
+    def _maybe_bot_command(self, player: str, content: str, raw: str = '') -> bool:
+        """处理 ``[触发词]帮助`` / ``[触发词]好感度 [玩家名]``。返回 True 表示已处理（AI 别再插嘴）。"""
+        text = (raw or content or '').strip()
+        if not text:
+            return False
+        low = text.lower()
+        for word in self._bot_command_words():
+            w = (word or '').strip()
+            if not w:
+                continue
+            idx = low.find(w.lower())
+            if idx < 0:
+                continue
+            after = text[idx + len(w):].strip().lstrip('：:，,、 ').strip()
+            if not after:
+                continue
+            head = after.split()[0] if after.split() else after
+            head_low = head.lower()
+            if head_low in ('帮助', 'help', '?', '？', '用法', '说明书', '玩法'):
+                self._send_bot_help(player)
+                self._post_ui({'kind': 'log', 'level': 'info',
+                               'message': f'[帮助] {player} 查看了机器人用法（已私聊）'})
+                return True
+            if head_low in ('好感度', '好感', '亲密度', 'affinity'):
+                target = after[len(head):].strip() or player
+                self._reply_affinity(player, target)
+                return True
+        return False
+
+    def _send_bot_help(self, player: str) -> None:
+        """私聊玩家：机器人用法（游戏内帮助）。
+
+        注意：内容里**不写半角 [点歌]**（用【点歌】代替），否则装了 Mod 的玩家会把这条
+        帮助也当成一次点歌（Mod 只认半角写法）。
+        """
+        name = self._msg_name(player)
+        if not name:
+            self._post_ui({'kind': 'log', 'level': 'warn',
+                           'message': f'[帮助] 「{player}」不像游戏 ID，帮助没发出去'})
+            return
+        words_all = self._bot_command_words()
+        song_trigger = (self.config.song.trigger or '').strip()
+        # ⚠ 帮助文本里绝不能出现点歌触发词（Mod 会把它当成一次点歌），只留 AI 触发词
+        words = [w for w in words_all if w and w != song_trigger]
+        t = next((w for w in words if w.startswith('[') or w.startswith('@')),
+                 words[0] if words else '触发词')
+        trigger_hint = ' / '.join(words[:3]) if words else '触发词'
+        stop = (self.config.song.stopWord or '停止').strip() or '停止'
+        lines = [
+            f'你好 {name}！我是服里的 AI 搭子，可以聊天、点歌、查好感度。',
+            f'· 找我聊天：想说的话前面带上触发词（{trigger_hint}）',
+            '· 点歌：【点歌】歌名 —— 机器人私聊把播放数据发给你（谁点谁听，不吵别人）',
+            f'· 停止：【点歌】{stop}；点歌台：【点歌】台（装了 Mod 按 K 也能开）',
+            f'· 好感度：{t}好感度 看自己的；{t}好感度 玩家名 看别人的',
+            '· 其它：/tpa 玩家、/home、/sethome、/sit、/lay、/spin 直接跟我说就行',
+            '· 完整说明见 HELP.md（或问服主）',
+        ]
+        for line in lines:
+            try:
+                if not self._engine.say(f'/msg {name} {line}'):
+                    break
+            except Exception:  # noqa: BLE001
+                break
+            time.sleep(0.35)
+
+    def _reply_affinity(self, asker: str, target: str) -> None:
+        """回复好感度（公屏，带等级）。"""
+        cfg = getattr(self.config, 'affinity', None)
+        if cfg is not None and not cfg.enabled:
+            self.send_chat('【好感度】这个功能没开（服主可在 config.json 的 affinity 段打开）')
+            return
+        info = self.affinity.info(target)
+        tail = '已经是最高档啦' if info['next'] is None else f"距离下一档还差 {info['toNext']} 点"
+        self.send_chat(f"【好感度】{info['name']}：{info['score']} 分"
+                       f"（{info['level']}，{info['blurb']}）— {tail}")
+        self._post_ui({'kind': 'log', 'level': 'info',
+                       'message': f"[好感度] {asker} 查询了 {info['name']}："
+                                  f"{info['score']}（{info['level']}）"})
+
+    def _on_ai_replied(self, player: Optional[str]) -> None:
+        """AI 回了话 → 给这个玩家加好感度（有冷却，防刷屏刷分）。"""
+        cfg = getattr(self.config, 'affinity', None)
+        if cfg is None or not cfg.enabled or not player:
+            return
+        before = self.affinity.score(player)
+        after = self.affinity.add(str(player), cfg.chatGain, 'chat',
+                                  cooldown=cfg.chatCooldownSeconds,
+                                  daily_bonus=cfg.dailyGain)
+        if after is not None and after != before:
+            self._post_ui({'kind': 'log', 'level': 'info',
+                           'message': f'[好感度] {player} +{after - before} → {after}'})
+
     def _send_song_help(self, who: str) -> None:
         """私聊（``/msg``）玩家：点歌触发词的全部用法。跑在后台线程里，一条一条慢慢发。"""
         name = str(who or '').strip()
@@ -1927,6 +2043,17 @@ class Controller:
         self._post_ui({'kind': 'log', 'level': 'song',
                        'message': f'[点歌] 已加入队列：{title} - {artist}'
                                   f'（队列 {len(self._song_queue)} 首）'})
+        # 好感度：点歌成功 +N（只有真实玩家名才算，GUI 里的「我」不算）
+        try:
+            cfg = getattr(self.config, 'affinity', None)
+            if cfg is not None and cfg.enabled and cfg.songGain > 0 and self._msg_name(who):
+                after = self.affinity.add(str(who), cfg.songGain, 'song',
+                                          cooldown=60, daily_bonus=cfg.dailyGain)
+                if after is not None:
+                    self._post_ui({'kind': 'log', 'level': 'info',
+                                   'message': f'[好感度] {who} 点歌 +{cfg.songGain} → {after}'})
+        except Exception:  # noqa: BLE001
+            pass
 
     def enqueue_existing(self, entry: Dict[str, Any], who: str = '我', source: str = 'gui') -> None:
         """把队列里已有的某首（别人的）歌，按原样再加进队列（不再解析）。"""
@@ -2516,6 +2643,8 @@ class Controller:
             if not private and self._check_reconnect_triggers(raw or content):
                 return
             if not private and self._maybe_relay_mc_to_qq(player, content):
+                return
+            if self._maybe_bot_command(player, content, raw):
                 return
             if not private and self._maybe_song_reply(player, content, raw):
                 return

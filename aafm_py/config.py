@@ -746,6 +746,30 @@ class SongConfig:
 
 
 @dataclass
+class AffinityConfig:
+    """好感度（``[触发词]好感度`` 查询）。
+
+    - ``enabled``             : 总开关。
+    - ``chatGain``            : 和机器人聊天一次加多少分。
+    - ``chatCooldownSeconds`` : 聊天加分的冷却（秒），防止刷屏刷分。
+    - ``songGain``            : 点歌成功一次加多少分（点歌本身有节流，不再另设冷却）。
+    - ``dailyGain``           : 每天第一次互动额外加多少分。
+    """
+    enabled: bool = True
+    chatGain: int = 1
+    chatCooldownSeconds: int = 300
+    songGain: int = 2
+    dailyGain: int = 1
+
+    def validate(self) -> None:
+        self.enabled = bool(self.enabled)
+        self.chatGain = _clamp_int(self.chatGain, 0, 100)
+        self.chatCooldownSeconds = _clamp_int(self.chatCooldownSeconds, 0, 86400)
+        self.songGain = _clamp_int(self.songGain, 0, 100)
+        self.dailyGain = _clamp_int(self.dailyGain, 0, 100)
+
+
+@dataclass
 class AppConfig:
     server: ServerConfig = field(default_factory=ServerConfig)
     auth: AuthConfig = field(default_factory=AuthConfig)
@@ -762,6 +786,7 @@ class AppConfig:
     appearance: AppearanceConfig = field(default_factory=AppearanceConfig)
     docBook: DocBookConfig = field(default_factory=DocBookConfig)
     song: SongConfig = field(default_factory=SongConfig)
+    affinity: AffinityConfig = field(default_factory=AffinityConfig)
 
     def validate(self) -> None:
         try:
@@ -787,6 +812,7 @@ class AppConfig:
         self.appearance.validate()
         self.docBook.validate()
         self.song.validate()
+        self.affinity.validate()
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -802,7 +828,7 @@ class AppConfig:
                 if isinstance(data, dict):
                     for section in ('server', 'auth', 'llm', 'quiz', 'autoeat', 'healthAlert',
                                     'verify', 'commandBlock', 'logForward', 'qq', 'roster',
-                                    'reconnect', 'appearance', 'docBook', 'song'):
+                                    'reconnect', 'appearance', 'docBook', 'song', 'affinity'):
                         sub = data.get(section)
                         if isinstance(sub, dict):
                             cur = getattr(cfg, section)

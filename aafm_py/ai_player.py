@@ -192,9 +192,12 @@ class AiPlayer:
                  on_send_chat: Callable[[str], None],
                  log: _LOG_CALLBACK = print,
                  error: _LOG_CALLBACK = None,
-                 roster: Optional[Any] = None):
+                 roster: Optional[Any] = None,
+                 on_reply: Optional[Callable[[Optional[str]], None]] = None):
         self.config = config
         self.on_send_chat = on_send_chat
+        # 每次真的回了话就回调一次（带玩家名）—— 好感度用它加分
+        self.on_reply = on_reply
         self._log_cb = log
         self._error_cb = error if error is not None else log
         self._roster = roster
@@ -615,6 +618,11 @@ class AiPlayer:
                 time.sleep(self._chunk_delay_ms / 1000.0)
         if sent > 0 and cfg.contextEnabled and cfg.contextLength > 0:
             self._add_to_context({'role': 'assistant', 'content': reply})
+        if sent > 0 and self.on_reply is not None:
+            try:
+                self.on_reply(self._current_player)
+            except Exception:  # noqa: BLE001
+                pass
         self._next_scheduled_reply_time = _now_ms() + cfg.scheduleIntervalSeconds * 1000
         self._log(f'已发送 {sent} 条 AI 消息。')
 
