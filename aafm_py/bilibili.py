@@ -39,7 +39,11 @@ def _get_json(url: str, timeout: float = 10.0) -> Optional[Dict[str, Any]]:
 
 
 def _item(raw: Dict[str, Any]) -> Optional[Dict[str, str]]:
-    """把接口返回的一条整理成 {title, owner, bvid, link, short}。"""
+    """把接口返回的一条整理成 {title, owner, bvid, link}。
+
+    ``link`` 保留完整协议头（``https://b23.tv/…``）—— 客户端会把 http(s) 链接渲染成可点击的，
+    点一下就打开浏览器（有些服务器会把它显示成可点的「[链接]」，同样能点开）。
+    """
     if not isinstance(raw, dict):
         return None
     bvid = str(raw.get('bvid') or '').strip()
@@ -50,17 +54,10 @@ def _item(raw: Dict[str, Any]) -> Optional[Dict[str, str]]:
     o = raw.get('owner')
     if isinstance(o, dict):
         owner = str(o.get('name') or '').strip()
-    link = ('https://www.bilibili.com/video/' + bvid) if bvid else str(raw.get('short_link_v2') or '')
     short = str(raw.get('short_link_v2') or '').strip()
-    if short.startswith('http://'):
-        short = short[len('http://'):]
-    elif short.startswith('https://'):
-        short = short[len('https://'):]
-    # 短链去掉协议头后给玩家看（服务器一般只拦 http(s):// 开头的整条链接，这样既不会被换成 [链接]，
-    # 又能直接复制到浏览器打开）
-    if not short and bvid:
-        short = 'www.bilibili.com/video/' + bvid
-    return {'title': title, 'owner': owner, 'bvid': bvid, 'link': link, 'short': short}
+    if not short.startswith('http'):
+        short = ('https://www.bilibili.com/video/' + bvid) if bvid else ''
+    return {'title': title, 'owner': owner, 'bvid': bvid, 'link': short}
 
 
 def popular(limit: int = 5) -> List[Dict[str, str]]:

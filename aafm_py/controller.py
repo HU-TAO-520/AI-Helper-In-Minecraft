@@ -1776,9 +1776,10 @@ class Controller:
         self._say_to(player, f'【视频推荐】给 {player} 的 B 站热门前 5 条：')
         for i, it in enumerate(items, 1):
             owner = f"（{it['owner']}）" if it.get('owner') else ''
-            line = f"{i}. {it['title']}{owner} {it['short']}"
+            link = it.get('link') or ''
+            line = f"{i}. {it['title']}{owner} {link}"
             if len(line) > 200:
-                line = line[:196] + '… ' + it['short']
+                line = line[:196] + '… ' + link
             self._say_to(player, line)
             time.sleep(0.4)
         self._post_ui({'kind': 'log', 'level': 'info',
