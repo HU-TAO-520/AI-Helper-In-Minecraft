@@ -140,6 +140,8 @@ class Controller:
         self._last_health_alert = 0.0
         self._song_reply_at: Dict[str, float] = {}
         self._song_posted_at: Dict[str, float] = {}
+        # 视频推荐：每个玩家的 30 秒冷却
+        self._video_at: Dict[str, float] = {}
         # 最近发过的歌：key -> (时间, 队列条目快照)。同一首歌又被点时直接复用，**不再搜一遍**
         # （链接里带的 id: 还能让 Mod 自己兜底重取）。
         self._song_recent: Dict[str, Any] = {}
@@ -1723,7 +1725,91 @@ class Controller:
                 target = after[len(head):].strip() or player
                 self._reply_affinity(player, target)
                 return True
+            if head_low in ('视频推荐', '推荐视频', '视频', 'b站', 'bilibili', '看看视频'):
+                self._handle_video_request(player)
+                return True
+            if head_low in ('今日幸运值', '幸运值', '今日幸运', '幸运', 'lucky'):
+                self._reply_lucky(player)
+                return True
         return False
+
+    # ------------------------------------------------------------------
+    # 视频推荐（B 站热门前 5 条，30 秒冷却，过了再点会刷新一轮）
+    # ------------------------------------------------------------------
+    VIDEO_COOLDOWN = 30.0
+
+    def _say_to(self, player: str, text: str) -> bool:
+        """私聊这个玩家（发不出去就退回公屏）。"""
+        name = self._msg_name(player)
+        if name:
+            try:
+                if self._engine.say(f'/msg {name} {text[:200]}'):
+                    return True
+            except Exception:  # noqa: BLE001
+                pass
+        self.send_chat(text[:250])
+        return False
+
+    def _handle_video_request(self, player: str) -> None:
+        now = time.time()
+        last = self._video_at.get(player, 0.0)
+        if now - last < self.VIDEO_COOLDOWN:
+            wait = int(self.VIDEO_COOLDOWN - (now - last)) + 1
+            self._say_to(player, f'【视频推荐】刚推过啦，{wait} 秒后再来（会刷新新一轮）')
+            return
+        self._video_at[player] = now
+        self._post_ui({'kind': 'log', 'level': 'info',
+                       'message': f'[视频推荐] {player} 要推荐（正在抓 B 站热门前 5 条）'})
+        threading.Thread(target=self._video_worker, args=(player,), daemon=True).start()
+
+    def _video_worker(self, player: str) -> None:
+        from . import bilibili
+        items = []
+        try:
+            items = bilibili.popular(5)
+        except Exception as e:  # noqa: BLE001
+            self._post_ui({'kind': 'log', 'level': 'warn',
+                           'message': f'[视频推荐] 抓取失败：{e}'})
+        if not items:
+            self._say_to(player, '【视频推荐】B 站接口暂时抽风了，稍等一下再试~')
+            return
+        self._say_to(player, f'【视频推荐】给 {player} 的 B 站热门前 5 条：')
+        for i, it in enumerate(items, 1):
+            owner = f"（{it['owner']}）" if it.get('owner') else ''
+            line = f"{i}. {it['title']}{owner} {it['short']}"
+            if len(line) > 200:
+                line = line[:196] + '… ' + it['short']
+            self._say_to(player, line)
+            time.sleep(0.4)
+        self._post_ui({'kind': 'log', 'level': 'info',
+                       'message': f'[视频推荐] 已私聊 {player} 5 条'})
+
+    # ------------------------------------------------------------------
+    # 今日幸运值（同一玩家同一天固定，隔天自动刷新）
+    # ------------------------------------------------------------------
+    @staticmethod
+    def _lucky_value(player: str, date_str: Optional[str] = None) -> int:
+        """用「日期 + 玩家名」做种子，得到 1~100 的固定值（不需要存盘）。"""
+        import hashlib
+        day = date_str or time.strftime('%Y-%m-%d', time.localtime())
+        raw = (day + '|' + str(player or '').strip().lower()).encode('utf-8')
+        return int(hashlib.md5(raw).hexdigest(), 16) % 100 + 1
+
+    def _reply_lucky(self, player: str) -> None:
+        val = self._lucky_value(player)
+        if val >= 90:
+            tail = '欧皇附体，今天适合开箱/抽卡！'
+        elif val >= 70:
+            tail = '手气不错，适合挑战一下。'
+        elif val >= 40:
+            tail = '普普通通的一天，稳扎稳打。'
+        elif val >= 20:
+            tail = '有点背，别乱冒险。'
+        else:
+            tail = '今天宜挂机、宜听歌、忌作死。'
+        self.send_chat(f'【今日幸运值】{player}：{val}/100 — {tail}（明天 0 点刷新）')
+        self._post_ui({'kind': 'log', 'level': 'info',
+                       'message': f'[幸运值] {player} 查询：{val}/100'})
 
     def _send_bot_help(self, player: str) -> None:
         """私聊玩家：机器人用法（游戏内帮助）。
@@ -1750,6 +1836,7 @@ class Controller:
             '· 点歌：【点歌】歌名 —— 机器人私聊把播放数据发给你（谁点谁听，不吵别人）',
             f'· 停止：【点歌】{stop}；点歌台：【点歌】台（装了 Mod 按 K 也能开）',
             f'· 好感度：{t}好感度 看自己的；{t}好感度 玩家名 看别人的',
+            f'· 视频推荐 / 今日幸运值：{t}视频推荐（B 站热门前 5 条，30 秒冷却）、{t}今日幸运值',
             '· 其它：/tpa 玩家、/home、/sethome、/sit、/lay、/spin 直接跟我说就行',
             '· 完整说明见 HELP.md（或问服主）',
         ]
