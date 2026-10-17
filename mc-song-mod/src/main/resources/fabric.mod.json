@@ -3,7 +3,7 @@
   "id": "songmod",
   "version": "${version}",
   "name": "点歌 Mod",
-  "description": "在聊天里发 [点歌]歌名，客户端本地搜索（网易云）并播放。装了本 Mod 的玩家都能听到；服务端无需任何改动。",
+  "description": "在聊天里发 [点歌]歌名：机器人用会员账号解析后私聊把播放数据发给你，本 Mod 负责播放（谁点谁听，不打扰别人）；机器人不在线时本地兜底自己搜网易云。服务端无需任何改动。",
   "authors": [
     "QingCheng3962"
   ],
@@ -19,7 +19,7 @@
   },
   "depends": {
     "fabricloader": ">=0.16.0",
-    "minecraft": "~1.21.11",
+    "minecraft": "~${minecraft_version}",
     "java": ">=${java_min}",
     "fabric-api": "*"
   }
