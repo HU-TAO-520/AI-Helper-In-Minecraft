@@ -23,6 +23,7 @@
 //   {"type":"writeBook","pages":[...],"startPage":int,"bookStart":int,"signBook":bool,"titleTemplate":str,"startText":...,"endText":...,"endDrop":bool,"autoGetBook":bool,"pagesPerBook":int}
 //   {"type":"clearBook"}
 //   {"type":"bookControl","action":"stop"|"pause"}
+//   {"type":"listPlayers"}   -> {"event":"players","players":[...]}   (在线玩家名单，群发私信用)
 //   {"type":"ping"}
 //   {"type":"quit"}
 
@@ -558,6 +559,15 @@ function handleCommand(cmd) {
         case 'clearBook':
             handleClearBook().catch((e) => logError(
                 'clearBook: ' + (e && e.message ? e.message : e)));
+            break;
+        case 'listPlayers':
+            try {
+                const names = Object.keys((bot && bot.players) || {})
+                    .filter((n) => n && n !== (bot && bot.username));
+                emitEvent({ event: 'players', players: names });
+            } catch (e) {
+                emitEvent({ event: 'players', players: [] });
+            }
             break;
         case 'ping':
             emitEvent({ event: 'pong' });

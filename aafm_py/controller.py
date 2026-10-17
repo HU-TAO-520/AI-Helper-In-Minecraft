@@ -13,7 +13,7 @@ import time
 import urllib.parse
 from typing import Any, Dict, List, Optional
 
-from .ai_player import AiPlayer
+from .ai_player import AiPlayer, _BRACKET_LITERAL, _compile_trigger, _split_top_level_commas
 from .affinity import AffinityStore
 from . import docbook
 from .bot_engine import BotEngine, BASE_DIR
@@ -140,8 +140,13 @@ class Controller:
         self._last_health_alert = 0.0
         self._song_reply_at: Dict[str, float] = {}
         self._song_posted_at: Dict[str, float] = {}
-        # 视频推荐：每个玩家的 30 秒冷却
-        self._video_at: Dict[str, float] = {}
+        # 视频推荐：**全服共用一个** 30 秒冷却（谁点都算，过了再点就换一批新的）
+        self._video_last_at: float = 0.0
+        # 在线玩家名单（引擎 spawn / players 事件更新；群发私信用）
+        self._player_list: List[str] = []
+        self._players_req_at: float = 0.0
+        self._players_got_at: float = 0.0
+        self._mass_running: bool = False
         # 最近发过的歌：key -> (时间, 队列条目快照)。同一首歌又被点时直接复用，**不再搜一遍**
         # （链接里带的 id: 还能让 Mod 自己兜底重取）。
         self._song_recent: Dict[str, Any] = {}
@@ -1683,35 +1688,61 @@ class Controller:
     # （[触发词] = 机器人 AI 的触发词或点歌触发词，例如 [DiaoHelper]帮助 / [点歌]好感度）
     # ------------------------------------------------------------------
     def _bot_command_words(self) -> List[str]:
-        """可用于触发「帮助/好感度」的词：AI 触发词 + 点歌触发词。"""
-        words: List[str] = []
-        try:
-            if self.ai_player is not None:
-                for part in str(getattr(self.ai_player.config, 'triggerRegex', '') or '').split(','):
-                    part = part.strip()
-                    if part and part not in words:
-                        words.append(part)
-        except Exception:  # noqa: BLE001
-            pass
-        t = (self.config.song.trigger or '').strip()
-        if t and t not in words:
-            words.append(t)
-        return words
+        """**提示词**（玩家配置页「触发正则」里配的那些，例如 ``[AI]`` / ``@DiaoHelper``）。
+
+        和点歌的 ``[点歌]`` 不是一回事：``[点歌]xxx`` 是 Mod 的点歌指令，这里只认 AI 提示词。
+        只在 AI 一个提示词都没配的时候，才拿点歌触发词兜底（免得一个都用不了）。
+        """
+        tokens: List[str] = []
+        for src in (getattr(self, 'ai_config', None), getattr(self, 'ai_player', None)):
+            cfg = getattr(src, 'config', src)
+            try:
+                raw = str(getattr(cfg, 'triggerRegex', '') or '')
+            except Exception:  # noqa: BLE001
+                raw = ''
+            for part in _split_top_level_commas(raw):
+                if part and part not in tokens:
+                    tokens.append(part)
+        if not tokens:
+            t = (self.config.song.trigger or '').strip()
+            if t:
+                tokens.append(t)
+        return tokens
+
+    def _bot_command_patterns(self) -> List[Any]:
+        """提示词编译成正则（复用 AI 自己那套规则：``[xxx]`` 当字面量，其余当正则）。"""
+        pats: List[Any] = []
+        for tok in self._bot_command_words():
+            try:
+                pats.append(_compile_trigger(tok))
+            except Exception:  # noqa: BLE001
+                continue
+        return pats
+
+    def _bot_trigger_hint(self) -> str:
+        """帮助文案里展示的提示词（挑一个像 ``[AI]`` / ``@xxx`` 的）。"""
+        tokens = self._bot_command_words()
+        for tok in tokens:
+            if _BRACKET_LITERAL.fullmatch(tok) or tok.startswith('@'):
+                return tok
+        return tokens[0] if tokens else '[AI]'
 
     def _maybe_bot_command(self, player: str, content: str, raw: str = '') -> bool:
-        """处理 ``[触发词]帮助`` / ``[触发词]好感度 [玩家名]``。返回 True 表示已处理（AI 别再插嘴）。"""
+        """处理 ``[提示词]帮助`` / ``[提示词]好感度`` / ``[提示词]视频推荐`` / ``[提示词]今日幸运值``。
+
+        返回 True 表示已处理（AI 别再插嘴）。
+        """
         text = (raw or content or '').strip()
         if not text:
             return False
-        low = text.lower()
-        for word in self._bot_command_words():
-            w = (word or '').strip()
-            if not w:
+        for pat in self._bot_command_patterns():
+            try:
+                m = pat.search(text)
+            except Exception:  # noqa: BLE001
                 continue
-            idx = low.find(w.lower())
-            if idx < 0:
+            if not m:
                 continue
-            after = text[idx + len(w):].strip().lstrip('：:，,、 ').strip()
+            after = text[m.end():].strip().lstrip('：:，,、 ').strip()
             if not after:
                 continue
             head = after.split()[0] if after.split() else after
@@ -1725,7 +1756,7 @@ class Controller:
                 target = after[len(head):].strip() or player
                 self._reply_affinity(player, target)
                 return True
-            if head_low in ('视频推荐', '推荐视频', '视频', 'b站', 'bilibili', '看看视频'):
+            if head_low in ('视频推荐', '推荐视频', '视频', 'b站', 'bilibili', '看看视频', '追番'):
                 self._handle_video_request(player)
                 return True
             if head_low in ('今日幸运值', '幸运值', '今日幸运', '幸运', 'lucky'):
@@ -1734,81 +1765,193 @@ class Controller:
         return False
 
     # ------------------------------------------------------------------
-    # 视频推荐（B 站热门前 5 条，30 秒冷却，过了再点会刷新一轮）
+    # 视频推荐（公屏；全服共用冷却，冷却过后再点会**换一批新的**）
     # ------------------------------------------------------------------
-    VIDEO_COOLDOWN = 30.0
-
-    def _say_to(self, player: str, text: str) -> bool:
-        """私聊这个玩家（发不出去就退回公屏）。"""
-        name = self._msg_name(player)
-        if name:
-            try:
-                if self._engine.say(f'/msg {name} {text[:200]}'):
-                    return True
-            except Exception:  # noqa: BLE001
-                pass
-        self.send_chat(text[:250])
-        return False
+    def _misc(self):
+        """杂项配置（老 config.json 里没有这段时给个默认的，别炸）。"""
+        cfg = getattr(self.config, 'misc', None)
+        if cfg is None:
+            from .config import MiscConfig
+            cfg = MiscConfig()
+            self.config.misc = cfg
+        return cfg
 
     def _handle_video_request(self, player: str) -> None:
-        now = time.time()
-        last = self._video_at.get(player, 0.0)
-        if now - last < self.VIDEO_COOLDOWN:
-            wait = int(self.VIDEO_COOLDOWN - (now - last)) + 1
-            self._say_to(player, f'【视频推荐】刚推过啦，{wait} 秒后再来（会刷新新一轮）')
+        cfg = self._misc()
+        if not cfg.videoEnabled:
+            self.send_chat('【视频推荐】这个功能没开（服主可在「杂项」页打开）')
             return
-        self._video_at[player] = now
+        now = time.time()
+        cool = float(cfg.videoCooldownSeconds)
+        last = self._video_last_at
+        if last and now - last < cool:
+            wait = int(cool - (now - last)) + 1
+            self.send_chat(cfg.videoCoolText.replace('{wait}', str(wait))
+                           .replace('{player}', player))
+            return
+        self._video_last_at = now
         self._post_ui({'kind': 'log', 'level': 'info',
-                       'message': f'[视频推荐] {player} 要推荐（正在抓 B 站热门前 5 条）'})
+                       'message': f'[视频推荐] {player} 要推荐（{cfg.source_name()}，正在抓一批新的）'})
         threading.Thread(target=self._video_worker, args=(player,), daemon=True).start()
 
     def _video_worker(self, player: str) -> None:
         from . import bilibili
+        cfg = self._misc()
+        source = cfg.videoSource or 'anime'
+        count = int(cfg.videoCount or 5)
+        # 最近推过的 id：换一批用（每个来源各记一份，保留最近 60 条）
+        seen: Dict[str, List[str]] = getattr(self, '_video_seen', None) or {}
+        self._video_seen = seen
+        used = list(seen.get(source) or [])
         items = []
         try:
-            items = bilibili.popular(5)
+            items = bilibili.recommend(source, count, exclude=used)
         except Exception as e:  # noqa: BLE001
             self._post_ui({'kind': 'log', 'level': 'warn',
                            'message': f'[视频推荐] 抓取失败：{e}'})
         if not items:
-            self._say_to(player, '【视频推荐】B 站接口暂时抽风了，稍等一下再试~')
+            self.send_chat(cfg.videoFailText.replace('{player}', player))
             return
-        self._say_to(player, f'【视频推荐】给 {player} 的 B 站热门前 5 条：')
+        seen[source] = (used + [str(x.get('id')) for x in items])[-60:]
+        head = (cfg.videoTitle.replace('{player}', player)
+                .replace('{count}', str(len(items)))
+                .replace('{source}', cfg.source_name()))
+        self.send_chat(head)
         for i, it in enumerate(items, 1):
-            owner = f"（{it['owner']}）" if it.get('owner') else ''
-            link = it.get('link') or ''
-            line = f"{i}. {it['title']}{owner} {link}"
+            line = (cfg.videoItemText
+                    .replace('{index}', str(i))
+                    .replace('{title}', it.get('title') or '')
+                    .replace('{owner}', it.get('owner') or '')
+                    .replace('{link}', it.get('link') or ''))
+            line = ' '.join(line.split())
             if len(line) > 200:
-                line = line[:196] + '… ' + link
-            self._say_to(player, line)
+                line = line[:196] + '… ' + (it.get('link') or '')
+            self.send_chat(line)
             time.sleep(0.4)
         self._post_ui({'kind': 'log', 'level': 'info',
-                       'message': f'[视频推荐] 已私聊 {player} 5 条'})
+                       'message': f'[视频推荐] 已在公屏推 {len(items)} 条（{cfg.source_name()}，'
+                                  f'{player} 点的）'})
 
     # ------------------------------------------------------------------
     # 今日幸运值（同一玩家同一天固定，隔天自动刷新）
     # ------------------------------------------------------------------
-    @staticmethod
-    def _lucky_value(player: str, date_str: Optional[str] = None) -> int:
-        """用「日期 + 玩家名」做种子，得到 1~100 的固定值（不需要存盘）。"""
+    def _lucky_value(self, player: str, date_str: Optional[str] = None) -> int:
+        """用「日期 + 玩家名」做种子，得到 1~luckMax 的固定值（不需要存盘）。"""
         import hashlib
+        cfg = self._misc()
+        mx = max(2, int(cfg.luckMax or 100))
         day = date_str or time.strftime('%Y-%m-%d', time.localtime())
-        raw = (day + '|' + str(player or '').strip().lower()).encode('utf-8')
-        return int(hashlib.md5(raw).hexdigest(), 16) % 100 + 1
+        raw = (day + '|' + str(player or '').strip().lower() + '|' + str(mx)).encode('utf-8')
+        return int(hashlib.md5(raw).hexdigest(), 16) % mx + 1
 
     def _reply_lucky(self, player: str) -> None:
+        cfg = self._misc()
+        if not cfg.luckEnabled:
+            self.send_chat('【今日幸运值】这个功能没开（服主可在「杂项」页打开）')
+            return
+        mx = max(2, int(cfg.luckMax or 100))
         val = self._lucky_value(player)
-        if val >= 90:
+        pct = val / mx
+        if pct >= 0.9:
             tail = '欧皇附体，今天适合开箱/抽卡！'
-        elif val >= 70:
+        elif pct >= 0.7:
             tail = '手气不错，适合挑战一下。'
-        elif val >= 40:
+        elif pct >= 0.4:
             tail = '普普通通的一天，稳扎稳打。'
-        elif val >= 20:
+        elif pct >= 0.2:
             tail = '有点背，别乱冒险。'
         else:
             tail = '今天宜挂机、宜听歌、忌作死。'
-        self.send_chat(f'【今日幸运值】{player}：{val}/100 — {tail}（明天 0 点刷新）')
+        text = (cfg.luckText
+                .replace('{player}', player)
+                .replace('{value}', str(val))
+                .replace('{max}', str(mx))
+                .replace('{comment}', tail)
+                .replace('{date}', time.strftime('%Y-%m-%d', time.localtime())))
+        self.send_chat(text)
+
+    # ------------------------------------------------------------------
+    # 群发私聊：把一句话 /msg 给所有在线玩家（GUI「杂项」页的输入框 + 按钮）
+    # ------------------------------------------------------------------
+    def refresh_player_list(self, wait: float = 1.2) -> List[str]:
+        """请引擎报一份在线名单（连不上/超时就用缓存里上次的）。"""
+        try:
+            eng = self._engine
+            if eng is not None and eng.running():
+                self._players_req_at = time.time()
+                eng.send({'type': 'listPlayers'})
+                deadline = time.time() + max(0.0, float(wait))
+                while time.time() < deadline:
+                    if self._players_got_at > self._players_req_at:
+                        break
+                    time.sleep(0.1)
+        except Exception:  # noqa: BLE001
+            pass
+        return list(self._player_list)
+
+    def mass_message(self, text: str, gap: Optional[float] = None,
+                     background: bool = True):
+        """把所有在线玩家私聊一遍（``/msg <玩家> <内容>``）。
+
+        ``gap`` 是**两个玩家之间的间隔秒数**（默认取杂项页的配置），防止刷太快被踢。
+        ``background=True`` 时丢到后台线程，立刻返回 ``-1``（表示已开始排队）。
+        """
+        text = (text or '').strip()
+        if not text:
+            return 0
+        if self._mass_running:
+            self._post_ui({'kind': 'log', 'level': 'warn',
+                           'message': '[群发] 上一次还没发完，稍等一下再点。'})
+            return 0
+        if background:
+            threading.Thread(target=self._mass_worker, args=(text, gap), daemon=True).start()
+            return -1
+        return self._mass_worker(text, gap)
+
+    def _mass_worker(self, text: str, gap: Optional[float] = None) -> int:
+        cfg = self._misc()
+        g = cfg.massGapSeconds if gap is None else gap
+        try:
+            g = max(0.0, min(10.0, float(g)))
+        except (TypeError, ValueError):
+            g = 0.5
+        self._mass_running = True
+        try:
+            players = self.refresh_player_list()
+            me = (self._bot_username or '').strip().lower()
+            names: List[str] = []
+            for p in players:
+                n = self._msg_name(p)
+                if not n:
+                    continue
+                if cfg.massSkipSelf and me and n.lower() == me:
+                    continue
+                if n not in names:
+                    names.append(n)
+            if not names:
+                self._post_ui({'kind': 'log', 'level': 'warn',
+                               'message': '[群发] 没拿到在线玩家名单（机器人没连上？）'})
+                return 0
+            self._post_ui({'kind': 'log', 'level': 'info',
+                           'message': f'[群发] 开始私聊 {len(names)} 个玩家，间隔 {g:g} 秒：{text}'})
+            ok = 0
+            for i, name in enumerate(names, 1):
+                cmd = f'/msg {name} '
+                room = max(20, 250 - len(cmd))
+                body = text if len(text) <= room else text[:room]
+                self._remember_sent(cmd + body)     # 自触发防线：记下自己发过的话
+                try:
+                    if self._engine.say(cmd + body):
+                        ok += 1
+                except Exception:  # noqa: BLE001
+                    pass
+                if i < len(names) and g > 0:
+                    time.sleep(g)
+            self._post_ui({'kind': 'log', 'level': 'info',
+                           'message': f'[群发] 完成：{ok}/{len(names)} 个玩家'})
+            return ok
+        finally:
+            self._mass_running = False
         self._post_ui({'kind': 'log', 'level': 'info',
                        'message': f'[幸运值] {player} 查询：{val}/100'})
 
@@ -1825,19 +1968,24 @@ class Controller:
             return
         words_all = self._bot_command_words()
         song_trigger = (self.config.song.trigger or '').strip()
-        # ⚠ 帮助文本里绝不能出现点歌触发词（Mod 会把它当成一次点歌），只留 AI 触发词
+        # ⚠ 帮助文本里绝不能出现点歌触发词（Mod 会把它当成一次点歌），只留 AI 提示词
         words = [w for w in words_all if w and w != song_trigger]
-        t = next((w for w in words if w.startswith('[') or w.startswith('@')),
-                 words[0] if words else '触发词')
-        trigger_hint = ' / '.join(words[:3]) if words else '触发词'
+        t = self._bot_trigger_hint()
+        if words and t == song_trigger:
+            t = '【提示词】'
+        trigger_hint = ' / '.join(words[:3]) if words else t
         stop = (self.config.song.stopWord or '停止').strip() or '停止'
+        misc = self._misc()
+        vcount = int(misc.videoCount or 5)
+        vcool = int(misc.videoCooldownSeconds or 30)
         lines = [
             f'你好 {name}！我是服里的 AI 搭子，可以聊天、点歌、查好感度。',
-            f'· 找我聊天：想说的话前面带上触发词（{trigger_hint}）',
+            f'· 找我聊天：想说的话前面带上提示词（{trigger_hint}）',
             '· 点歌：【点歌】歌名 —— 机器人私聊把播放数据发给你（谁点谁听，不吵别人）',
             f'· 停止：【点歌】{stop}；点歌台：【点歌】台（装了 Mod 按 K 也能开）',
             f'· 好感度：{t}好感度 看自己的；{t}好感度 玩家名 看别人的',
-            f'· 视频推荐 / 今日幸运值：{t}视频推荐（B 站热门前 5 条，30 秒冷却）、{t}今日幸运值',
+            f'· 视频推荐 / 今日幸运值：{t}视频推荐（{misc.source_name()}前 {vcount} 条，'
+            f'全服 {vcool} 秒冷却）、{t}今日幸运值（每天固定一个）',
             '· 其它：/tpa 玩家、/home、/sethome、/sit、/lay、/spin 直接跟我说就行',
             '· 完整说明见 HELP.md（或问服主）',
         ]
@@ -2764,6 +2912,8 @@ class Controller:
                     self.ai_player.set_bot_username(username)
                     self.ai_player.set_online(True)
             players = ev.get('players') or []
+            self._player_list = [str(p) for p in players if str(p or '').strip()]
+            self._players_got_at = time.time()
             self._post_ui({'kind': 'status', 'text': f'已连接（{username}）'})
             self._post_ui({'kind': 'spawn', 'username': username, 'players': players})
             self._post_ui({'kind': 'log', 'level': 'info',
@@ -2777,6 +2927,12 @@ class Controller:
             self._auto_lobby_at = None
             self._online_next_check = None
             self._online_retry_at = None
+        elif event == 'players':
+            # 引擎回的在线名单（群发私信用；也顺手给 UI 更新一下）
+            players = ev.get('players') or []
+            self._player_list = [str(p) for p in players if str(p or '').strip()]
+            self._players_got_at = time.time()
+            self._post_ui({'kind': 'players', 'players': list(self._player_list)})
         elif event == 'kicked':
             was_connected = self._connected
             self._connected = False

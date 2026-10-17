@@ -307,6 +307,7 @@ class AiPlayerGUI:
         self._build_player_tab()
         self._build_docbook_tab()
         self._build_song_tab()
+        self._build_misc_tab()
         self._build_roster_tab()
         self._build_qq_tab()
         self._build_reconnect_tab()
@@ -848,6 +849,130 @@ class AiPlayerGUI:
             if qr is not None:
                 qr.close()
             self._netease_login_running = False
+
+    # ------------------------------------------------------------------
+    # Tab: 杂项（视频推荐 / 今日幸运值 / 群发私聊）
+    # ------------------------------------------------------------------
+    _VIDEO_SOURCE_LABELS = ['番剧追番榜（追番）', 'B 站首页热门', 'B 站全站排行']
+    _VIDEO_SOURCE_KEYS = ['anime', 'hot', 'rank']
+
+    def _build_misc_tab(self) -> None:
+        host = ttk.Frame(self.notebook, padding=(8, 8))
+        self.notebook.add(host, text=' 杂项 ')
+        sc = ScrollFrame(host)
+        sc.pack(fill='both', expand=True)
+
+        # ---------------- 视频推荐 ----------------
+        video = ttk.LabelFrame(
+            sc.inner, text='视频推荐（玩家发 [触发词]视频推荐 → 公屏推一批 B 站视频）', padding=8)
+        video.pack(fill='x', pady=(8, 0))
+        self.var_misc_video_enabled = tk.BooleanVar(value=True)
+        ttk.Checkbutton(video, text='开启「视频推荐」',
+                        variable=self.var_misc_video_enabled).grid(
+            row=0, column=0, columnspan=3, sticky='w', padx=4, pady=3)
+
+        ttk.Label(video, text='推荐来源').grid(row=1, column=0, sticky='w', padx=4, pady=3)
+        self.var_misc_video_source = tk.StringVar(value=self._VIDEO_SOURCE_LABELS[0])
+        ttk.Combobox(video, textvariable=self.var_misc_video_source, state='readonly',
+                     values=self._VIDEO_SOURCE_LABELS, width=22).grid(
+            row=1, column=1, sticky='w', padx=4, pady=3)
+
+        ttk.Label(video, text='每次推几条').grid(row=1, column=2, sticky='e', padx=(20, 4))
+        self.var_misc_video_count = tk.StringVar(value='5')
+        ttk.Entry(video, textvariable=self.var_misc_video_count, width=6).grid(
+            row=1, column=3, sticky='w', padx=4, pady=3)
+
+        ttk.Label(video, text='全服冷却（秒）').grid(row=2, column=0, sticky='w', padx=4, pady=3)
+        self.var_misc_video_cooldown = tk.StringVar(value='30')
+        ttk.Entry(video, textvariable=self.var_misc_video_cooldown, width=8).grid(
+            row=2, column=1, sticky='w', padx=4, pady=3)
+        ttk.Label(video, text='谁的请求都算；冷却过后再发 = 换一批新的（越点越多）',
+                  foreground='#888888').grid(row=2, column=2, columnspan=2, sticky='w', padx=4)
+
+        ttk.Label(video, text='抬头文案').grid(row=3, column=0, sticky='w', padx=4, pady=3)
+        self.var_misc_video_title = tk.StringVar()
+        ttk.Entry(video, textvariable=self.var_misc_video_title, width=62).grid(
+            row=3, column=1, columnspan=3, sticky='we', padx=4, pady=3)
+        ttk.Label(video, text='可用 {player} 谁点的、{count} 条数、{source} 来源名',
+                  foreground='#888888').grid(row=4, column=1, columnspan=3, sticky='w', padx=4)
+
+        ttk.Label(video, text='每条文案').grid(row=5, column=0, sticky='w', padx=4, pady=3)
+        self.var_misc_video_item = tk.StringVar()
+        ttk.Entry(video, textvariable=self.var_misc_video_item, width=62).grid(
+            row=5, column=1, columnspan=3, sticky='we', padx=4, pady=3)
+        ttk.Label(video, text='可用 {index} 序号、{title} 标题、{owner} 备注（UP 主 / 更新进度）、{link} 链接',
+                  foreground='#888888').grid(row=6, column=1, columnspan=3, sticky='w', padx=4)
+
+        self.var_misc_video_cool = tk.StringVar()
+        self.var_misc_video_fail = tk.StringVar()
+        self._entry(video, 7, '冷却中提示', self.var_misc_video_cool,
+                    hint='可用 {wait} 还要等几秒；{player} 谁点的')
+        self._entry(video, 8, '抓取失败提示', self.var_misc_video_fail)
+        video.columnconfigure(1, weight=1)
+
+        # ---------------- 今日幸运值 ----------------
+        luck = ttk.LabelFrame(
+            sc.inner, text='今日幸运值（玩家发 [触发词]今日幸运值 → 公屏回当天的运气值）', padding=8)
+        luck.pack(fill='x', pady=(8, 0))
+        self.var_misc_luck_enabled = tk.BooleanVar(value=True)
+        ttk.Checkbutton(luck, text='开启「今日幸运值」', variable=self.var_misc_luck_enabled).grid(
+            row=0, column=0, columnspan=3, sticky='w', padx=4, pady=3)
+        ttk.Label(luck, text='最大值').grid(row=1, column=0, sticky='w', padx=4, pady=3)
+        self.var_misc_luck_max = tk.StringVar(value='100')
+        ttk.Entry(luck, textvariable=self.var_misc_luck_max, width=8).grid(
+            row=1, column=1, sticky='w', padx=4, pady=3)
+        ttk.Label(luck, text='同一天固定（日期 + 玩家名算出来），隔天 0 点自动刷新，不用存盘',
+                  foreground='#888888').grid(row=1, column=2, sticky='w', padx=4)
+        ttk.Label(luck, text='回复文案').grid(row=2, column=0, sticky='w', padx=4, pady=3)
+        self.var_misc_luck_text = tk.StringVar()
+        ttk.Entry(luck, textvariable=self.var_misc_luck_text, width=62).grid(
+            row=2, column=1, columnspan=2, sticky='we', padx=4, pady=3)
+        ttk.Label(luck, text='可用 {player} 玩家、{value} 幸运值、{max} 最大值、'
+                             '{comment} 评语（按分数自动给）、{date} 日期',
+                  foreground='#888888').grid(row=3, column=1, columnspan=2, sticky='w', padx=4)
+        luck.columnconfigure(1, weight=1)
+
+        # ---------------- 群发私聊 ----------------
+        mass = ttk.LabelFrame(
+            sc.inner, text='群发私聊（把一句话用 /msg 发给所有在线玩家）', padding=8)
+        mass.pack(fill='x', pady=(8, 0))
+        self.var_misc_mass_text = tk.StringVar()
+        self.var_misc_mass_skipself = tk.BooleanVar(value=True)
+        row = ttk.Frame(mass)
+        row.pack(fill='x', pady=3)
+        mass_entry = ttk.Entry(row, textvariable=self.var_misc_mass_text)
+        mass_entry.pack(side='left', fill='x', expand=True, padx=(4, 6))
+        mass_entry.bind('<Return>', lambda _e: self._on_mass_send())
+        ttk.Button(row, text='发送给所有玩家', command=self._on_mass_send).pack(side='left')
+        row2 = ttk.Frame(mass)
+        row2.pack(fill='x', pady=(0, 2))
+        ttk.Label(row2, text='每个玩家之间的间隔（秒）').pack(side='left', padx=4)
+        self.var_misc_mass_gap = tk.StringVar(value='0.5')
+        ttk.Entry(row2, textvariable=self.var_misc_mass_gap, width=8).pack(side='left')
+        ttk.Checkbutton(row2, text='跳过机器人自己',
+                        variable=self.var_misc_mass_skipself).pack(side='left', padx=(12, 0))
+        ttk.Label(mass, text='发送时先向引擎要一份在线名单，再一个一个私聊；间隔太小容易被服务器当刷屏踢下线，'
+                             '建议 0.3～1 秒。',
+                  foreground='#888888', wraplength=780, justify='left').pack(anchor='w', padx=4)
+
+    def _on_mass_send(self) -> None:
+        """群发按钮：把输入框里的内容 /msg 给所有在线玩家。"""
+        text = (self.var_misc_mass_text.get() or '').strip()
+        if not text:
+            messagebox.showinfo('aafm AI 玩家', '先写点要发的内容吧。')
+            return
+        if '[点歌]' in text:
+            if not messagebox.askyesno(
+                    'aafm AI 玩家',
+                    '内容里有半角 [点歌]，装了点歌 Mod 的玩家会把它当成点歌。确定要发吗？'):
+                return
+        self._gather_config()
+        gap = self._parse_float(self.var_misc_mass_gap.get(), 0.5)
+        n = self.controller.mass_message(text, gap=gap, background=True)
+        if n == 0:
+            self._append_log('群发没发出去（机器人没连上，或上一次还在发）。', 'warn')
+        else:
+            self._append_log(f'已开始群发：{text}（间隔 {gap:g} 秒）', 'info')
 
     def _apply_netease_cookie(self, cookie):
         """把扫码拿到的 Cookie 填进输入框并立即保存到 config.json。"""
@@ -2108,6 +2233,24 @@ class AiPlayerGUI:
         self.var_song_play_text.set(cfg.song.playText or '{player} 点了一首 {music}')
         self.var_song_instant_play.set(bool(getattr(cfg.song, 'instantPlay', True)))
         self.var_song_private_play.set(bool(getattr(cfg.song, 'privatePlay', True)))
+        misc = getattr(cfg, 'misc', None)
+        if misc is not None:
+            self.var_misc_video_enabled.set(bool(misc.videoEnabled))
+            src = getattr(misc, 'videoSource', 'anime')
+            label = dict(zip(self._VIDEO_SOURCE_KEYS, self._VIDEO_SOURCE_LABELS)).get(
+                src, self._VIDEO_SOURCE_LABELS[0])
+            self.var_misc_video_source.set(label)
+            self.var_misc_video_count.set(str(misc.videoCount))
+            self.var_misc_video_cooldown.set(str(misc.videoCooldownSeconds))
+            self.var_misc_video_title.set(misc.videoTitle)
+            self.var_misc_video_item.set(misc.videoItemText)
+            self.var_misc_video_cool.set(misc.videoCoolText)
+            self.var_misc_video_fail.set(misc.videoFailText)
+            self.var_misc_luck_enabled.set(bool(misc.luckEnabled))
+            self.var_misc_luck_max.set(str(misc.luckMax))
+            self.var_misc_luck_text.set(misc.luckText)
+            self.var_misc_mass_gap.set(f'{float(misc.massGapSeconds):g}')
+            self.var_misc_mass_skipself.set(bool(misc.massSkipSelf))
         if hasattr(self, '_netease_status'):
             self._netease_status.set('已登录（会员 Cookie 已保存）'
                                      if (cfg.song.neteaseCookie or '').strip()
@@ -2383,6 +2526,24 @@ class AiPlayerGUI:
         song.instantPlay = bool(self.var_song_instant_play.get())
         song.privatePlay = bool(self.var_song_private_play.get())
         song.validate()
+
+        misc = cfg.misc
+        misc.videoEnabled = bool(self.var_misc_video_enabled.get())
+        label = self.var_misc_video_source.get().strip()
+        misc.videoSource = dict(zip(self._VIDEO_SOURCE_LABELS, self._VIDEO_SOURCE_KEYS)).get(
+            label, getattr(misc, 'videoSource', 'anime') or 'anime')
+        misc.videoCount = self._parse_int(self.var_misc_video_count.get(), 5)
+        misc.videoCooldownSeconds = self._parse_int(self.var_misc_video_cooldown.get(), 30)
+        misc.videoTitle = self.var_misc_video_title.get().strip()
+        misc.videoItemText = self.var_misc_video_item.get().strip()
+        misc.videoCoolText = self.var_misc_video_cool.get().strip()
+        misc.videoFailText = self.var_misc_video_fail.get().strip()
+        misc.luckEnabled = bool(self.var_misc_luck_enabled.get())
+        misc.luckMax = self._parse_int(self.var_misc_luck_max.get(), 100)
+        misc.luckText = self.var_misc_luck_text.get().strip()
+        misc.massGapSeconds = self._parse_float(self.var_misc_mass_gap.get(), 0.5)
+        misc.massSkipSelf = bool(self.var_misc_mass_skipself.get())
+        misc.validate()
 
         cfg.save()
         ai.save()

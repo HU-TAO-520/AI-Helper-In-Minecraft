@@ -18,7 +18,7 @@
 
 | 路径 | 内容 |
 | --- | --- |
-| `aafm_py/` | Python 端：`gui.py`（tkinter 多标签页）、`controller.py`（事件分发 / 点歌 / 好感度 / 命令）、`ai_player.py`（LLM 对话）、`netease.py`（网易云）、`affinity.py`（好感度存取）、`docbook.py` + `log_saver.py` |
+| `aafm_py/` | Python 端：`gui.py`（tkinter 多标签页）、`controller.py`（事件分发 / 点歌 / 好感度 / 命令 / 群发）、`ai_player.py`（LLM 对话）、`netease.py`（网易云）、`bilibili.py`（视频推荐抓取）、`affinity.py`（好感度存取）、`docbook.py` + `log_saver.py` |
 | `bot_engine.js` / `qq_engine.js` | Node 端：mineflayer 无头引擎 / OneBot 11 QQ 转述 |
 | `mc-song-mod/` | 客户端点歌 Mod（Fabric **1.21.1 ~ 26.2**）：`src/main`（共用）+ `src/legacy`（1.21.x，mojmap + 重映射 Loom，含界面）+ `src/modern`（26.x，无界面，Java 25） |
 | `mc-music-bridge/` | 服务端插件（可选，ZMusic v5 协议） |
@@ -52,9 +52,12 @@ powershell -ExecutionPolicy Bypass -File build_all.ps1
 5. **机器人会被自己的话触发**：带触发词的日志不要转发到游戏；发出过的内容要记账（回声忽略）；同一句连点要熔断。
 6. **26.2 聊天栏入口**从 `mc.gui.getChat()` 挪到了 `mc.gui.hud.getChat()` → 用反射两条路都试。
 7. 玩家消息 / 指令只认**玩家自己发的**（Mod 里的 `mine` 标记），别人的点歌不能触发我的本地兜底，`[点歌]停止` 只停自己。
+8. **提示词 ≠ 点歌触发词**：`帮助 / 好感度 / 视频推荐 / 今日幸运值` 认的是**「玩家配置 → 触发正则」里配的提示词**（`[DiaoHelper]`、`@DiaoHelper`…，正则，可能用逗号分隔多条），**不是** `[点歌]`。判断要复用 `ai_player._compile_trigger` / `_split_top_level_commas`（`[xxx]` 当字面量、其余当正则），别自己按逗号切。
 
 ## 五、默认行为约定
 
 - 点歌默认**谁点谁听**（机器人 `/msg` 私聊 + Mod `onlyMySong`）。
 - 帮助 / 好感度私聊或公屏回复都**不能包含半角 `[点歌]`**（会把 Mod 骗去点歌），统一用 `【点歌】`。
 - 好感度默认：聊天 +1 / 5 分钟、点歌 +2 / 1 分钟、每日首次 +1；数据在 `affinity.json`。
+- 视频推荐默认**发公屏**、来源**番剧追番榜**、**全服共用** 30 秒冷却；冷却过后再点要**换一批新的**（先避开刚推过的 id）。文案都在「杂项」页。
+- 群发私聊（GUI「杂项」页）逐个 `/msg`，每个玩家之间有间隔（默认 0.5 秒），别调太小（会被当刷屏踢）；自触发防线照旧要记 `_remember_sent`。

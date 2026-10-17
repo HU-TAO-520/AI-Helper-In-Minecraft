@@ -33,11 +33,12 @@ A "client-less" Minecraft AI player: it never opens the game itself. A GUI drive
 
 ### v3.2.1
 
-- **`[trigger]帮助` (help)**: send `[DiaoHelper]帮助` (any AI trigger or the song trigger works) → the bot **whispers** you a usage guide (chat, song requests, stop, affinity, other commands). The help text deliberately avoids the half-width `[点歌]` (uses `【点歌】`) so modded clients don't mistake it for a song request.
+- **`[提示词]帮助` (help)**: send `[DiaoHelper]帮助` → the bot **whispers** you a usage guide (chat, song requests, stop, affinity, video recommendations, lucky value, other commands). The **提示词 is whatever is configured under 玩家配置 → 触发正则** (`[DiaoHelper]`, `@DiaoHelper`…), *not* the song trigger `[点歌]`. The help text deliberately avoids the half-width `[点歌]` (uses `【点歌】`) so modded clients don't mistake it for a song request.
 - **Affinity (new)**: `[DiaoHelper]好感度` shows your score / level / points to the next level; `[DiaoHelper]好感度 <player>` shows someone else's. Defaults: +1 per AI reply (5 min cooldown), +2 per successful song request (1 min), +1 bonus on the first interaction of each day; levels 陌生人 → 脸熟 → 熟人 → 朋友 → 好朋友 → 挚友. Stored in `affinity.json`, configured under `affinity` in `config.json`.
-- **New [`HELP.md`](HELP.md)**: the full player-facing guide (song requests, affinity, FAQ, config map for server owners).
-- **Video recommendations**: `[DiaoHelper]视频推荐` → DMs the **Bilibili top‑5** (title + uploader + a **clickable** `https://b23.tv/…` short link — clicking opens the browser; some servers render it as a clickable `[链接]`); **30 s cooldown per player**, and asking again after the cooldown **refreshes** the list.
-- **Daily lucky value**: `[DiaoHelper]今日幸运值` → a 1–100 value fixed for that day (seeded by date + player name, nothing stored), refreshing at midnight.
+- **New [`HELP.md`](HELP.md)**: the full player-facing guide (song requests, affinity, video recommendations, lucky value, FAQ, config map for server owners).
+- **Video recommendations**: `[DiaoHelper]视频推荐` → **public chat** posts a batch of Bilibili videos (title + note + a **clickable** link — clicking opens the browser; some servers render it as a clickable `[链接]`). Source is selectable: **番剧追番榜 / anime-ranking (default)**, Bilibili homepage popular, or the all-site ranking; count and all texts are editable in the new **杂项 (Misc)** tab. The cooldown is **server-wide** (30 s by default) and asking again after it **swaps in a new batch** (picked from a pool of dozens, avoiding what was just shown).
+- **Daily lucky value**: `[DiaoHelper]今日幸运值` → a value fixed for that day (seeded by date + player name, nothing stored; max value and text are configurable in the Misc tab), refreshing at midnight.
+- **New 杂项 (Misc) tab**: toggles + texts + cooldown for video recommendations and the lucky value, plus **mass private message** — type a line, hit "发送给所有玩家", and the bot `/msg`s every online player one by one (with a configurable **gap between players** so it never gets kicked for spamming; the bot skips itself).
 - Fix: `fabric.mod.json` now injects the `minecraft` dependency per version (fixes the **26.x "incompatible"** error — every jar used to hard-code `~1.21.11`).
 
 ### v3.2.0

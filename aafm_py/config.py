@@ -769,6 +769,80 @@ class AffinityConfig:
         self.dailyGain = _clamp_int(self.dailyGain, 0, 100)
 
 
+# 视频推荐来源
+VIDEO_SOURCES = {
+    'anime': '番剧追番榜',     # pgc/web/rank/list?season_type=1
+    'hot': 'B 站首页热门',     # x/web-interface/popular
+    'rank': 'B 站全站排行',    # x/web-interface/ranking/v2
+}
+
+
+@dataclass
+class MiscConfig:
+    """杂项：视频推荐 / 今日幸运值 / 群发私聊。
+
+    对应聊天指令（触发词 = AI 触发词或点歌触发词）：
+
+    - ``[触发词]视频推荐``   → 公屏推一批 B 站视频（默认番剧/追番榜），**全服共用**冷却，
+      冷却过后再点会**重新抓一批新的**（换一批 BV，越点越多）。
+    - ``[触发词]今日幸运值`` → 当天固定的 1~``luckMax`` 幸运值（日期+玩家名做种子，隔天刷新）。
+    - 群发私聊：GUI「杂项」页一个输入框 + 按钮，把一句话 ``/msg`` 给所有在线玩家。
+    """
+
+    # ---------------- 视频推荐 ----------------
+    videoEnabled: bool = True
+    # 来源：anime=番剧追番榜（默认）/ hot=B 站首页热门 / rank=B 站全站排行
+    videoSource: str = 'anime'
+    # 一次推几条
+    videoCount: int = 5
+    # 全服共用冷却（秒）：谁的请求都算，冷却过后再点 = 换一批新的
+    videoCooldownSeconds: int = 30
+    # 抬头文案：{player} 谁点的、{count} 条数、{source} 来源名
+    videoTitle: str = '【视频推荐】{player} 点的{source}前 {count} 条：'
+    # 每条文案：{index} 序号、{title} 标题、{owner} 备注（UP主/更新进度）、{link} 链接
+    videoItemText: str = '{index}. {title} {owner} {link}'
+    # 冷却中的提示：{wait} 还要等几秒
+    videoCoolText: str = '【视频推荐】刚推过啦，{wait} 秒后再来（会换一批新的）'
+    # 抓取失败
+    videoFailText: str = '【视频推荐】B 站接口暂时抽风了，稍等一下再试~'
+
+    # ---------------- 今日幸运值 ----------------
+    luckEnabled: bool = True
+    luckMax: int = 100
+    # 文案：{player} 玩家、{value} 幸运值、{max} 最大值、{comment} 评语、{date} 日期
+    luckText: str = '【今日幸运值】{player}：{value}/{max} — {comment}（明天 0 点刷新）'
+
+    # ---------------- 群发私聊（/msg 所有在线玩家）----------------
+    # 每两个玩家之间的间隔（秒），防止刷太快被服务器当刷屏踢下线
+    massGapSeconds: float = 0.5
+    # 群发时是否跳过机器人自己和在线名单里不像玩家名的条目
+    massSkipSelf: bool = True
+
+    def validate(self) -> None:
+        self.videoEnabled = bool(self.videoEnabled)
+        src = str(self.videoSource or 'anime').strip().lower()
+        self.videoSource = src if src in VIDEO_SOURCES else 'anime'
+        self.videoCount = _clamp_int(self.videoCount, 1, 10)
+        self.videoCooldownSeconds = _clamp_int(self.videoCooldownSeconds, 0, 3600)
+        self.videoTitle = (str(self.videoTitle or '').strip()
+                           or '【视频推荐】{player} 点的{source}前 {count} 条：')
+        self.videoItemText = str(self.videoItemText or '').strip() or '{index}. {title} {owner} {link}'
+        self.videoCoolText = (str(self.videoCoolText or '').strip()
+                              or '【视频推荐】刚推过啦，{wait} 秒后再来（会换一批新的）')
+        self.videoFailText = (str(self.videoFailText or '').strip()
+                              or '【视频推荐】B 站接口暂时抽风了，稍等一下再试~')
+        self.luckEnabled = bool(self.luckEnabled)
+        self.luckMax = _clamp_int(self.luckMax, 10, 1000)
+        self.luckText = (str(self.luckText or '').strip()
+                         or '【今日幸运值】{player}：{value}/{max} — {comment}（明天 0 点刷新）')
+        self.massGapSeconds = _clamp_float(self.massGapSeconds, 0.0, 10.0)
+        self.massSkipSelf = bool(self.massSkipSelf)
+
+    def source_name(self) -> str:
+        """来源的中文名（给文案里的 {source} 用）。"""
+        return VIDEO_SOURCES.get(self.videoSource or 'anime', VIDEO_SOURCES['anime'])
+
+
 @dataclass
 class AppConfig:
     server: ServerConfig = field(default_factory=ServerConfig)
@@ -787,6 +861,7 @@ class AppConfig:
     docBook: DocBookConfig = field(default_factory=DocBookConfig)
     song: SongConfig = field(default_factory=SongConfig)
     affinity: AffinityConfig = field(default_factory=AffinityConfig)
+    misc: MiscConfig = field(default_factory=MiscConfig)
 
     def validate(self) -> None:
         try:
@@ -813,6 +888,7 @@ class AppConfig:
         self.docBook.validate()
         self.song.validate()
         self.affinity.validate()
+        self.misc.validate()
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -828,7 +904,8 @@ class AppConfig:
                 if isinstance(data, dict):
                     for section in ('server', 'auth', 'llm', 'quiz', 'autoeat', 'healthAlert',
                                     'verify', 'commandBlock', 'logForward', 'qq', 'roster',
-                                    'reconnect', 'appearance', 'docBook', 'song', 'affinity'):
+                                    'reconnect', 'appearance', 'docBook', 'song', 'affinity',
+                                    'misc'):
                         sub = data.get(section)
                         if isinstance(sub, dict):
                             cur = getattr(cfg, section)
