@@ -853,8 +853,9 @@ class AiPlayerGUI:
     # ------------------------------------------------------------------
     # Tab: 杂项（视频推荐 / 今日幸运值 / 群发私聊）
     # ------------------------------------------------------------------
-    _VIDEO_SOURCE_LABELS = ['番剧追番榜（追番）', 'B 站首页热门', 'B 站全站排行']
-    _VIDEO_SOURCE_KEYS = ['anime', 'hot', 'rank']
+    _VIDEO_SOURCE_LABELS = ['番剧追番榜（追番）', 'B 站首页推荐（主页）', 'B 站首页热门',
+                            'B 站全站排行', '我的收藏夹（要登录 B 站）']
+    _VIDEO_SOURCE_KEYS = ['anime', 'home', 'hot', 'rank', 'fav']
 
     def _build_misc_tab(self) -> None:
         host = ttk.Frame(self.notebook, padding=(8, 8))
@@ -874,7 +875,7 @@ class AiPlayerGUI:
         ttk.Label(video, text='推荐来源').grid(row=1, column=0, sticky='w', padx=4, pady=3)
         self.var_misc_video_source = tk.StringVar(value=self._VIDEO_SOURCE_LABELS[0])
         ttk.Combobox(video, textvariable=self.var_misc_video_source, state='readonly',
-                     values=self._VIDEO_SOURCE_LABELS, width=22).grid(
+                     values=self._VIDEO_SOURCE_LABELS, width=24).grid(
             row=1, column=1, sticky='w', padx=4, pady=3)
 
         ttk.Label(video, text='每次推几条').grid(row=1, column=2, sticky='e', padx=(20, 4))
@@ -908,6 +909,39 @@ class AiPlayerGUI:
         self._entry(video, 7, '冷却中提示', self.var_misc_video_cool,
                     hint='可用 {wait} 还要等几秒；{player} 谁点的')
         self._entry(video, 8, '抓取失败提示', self.var_misc_video_fail)
+
+        # ---- B 站账号（来源选「我的收藏夹」才需要）----
+        bili = ttk.LabelFrame(video, text='B 站账号（只有来源选「我的收藏夹」才需要）',
+                              padding=(6, 6))
+        bili.grid(row=9, column=0, columnspan=4, sticky='we', padx=4, pady=(8, 4))
+        self.var_misc_bili_cookie = tk.StringVar()
+        self.var_misc_bili_fav = tk.StringVar()
+        self.var_misc_bili_status = tk.StringVar(value='（还没读取）')
+        self._bili_fav_map = {}
+        self._bili_fav_cur = {'media_id': 0, 'name': ''}
+
+        ttk.Label(bili, text='SESSDATA').grid(row=0, column=0, sticky='w', padx=4, pady=3)
+        ttk.Entry(bili, textvariable=self.var_misc_bili_cookie, width=44,
+                  show='*').grid(row=0, column=1, sticky='we', padx=4, pady=3)
+        ttk.Button(bili, text='读取收藏夹', command=self._on_bili_folders).grid(
+            row=0, column=2, sticky='w', padx=4, pady=3)
+        ttk.Label(bili, textvariable=self.var_misc_bili_status,
+                  foreground='#888888').grid(row=0, column=3, sticky='w', padx=4)
+
+        ttk.Label(bili, text='收藏夹').grid(row=1, column=0, sticky='w', padx=4, pady=3)
+        self.cmb_bili_fav = ttk.Combobox(bili, textvariable=self.var_misc_bili_fav,
+                                         width=36, values=[])
+        self.cmb_bili_fav.grid(row=1, column=1, sticky='w', padx=4, pady=3)
+        ttk.Label(bili, text='点上面按钮读出来再选；也可以直接填收藏夹 id（纯数字）',
+                  foreground='#888888').grid(row=1, column=2, columnspan=2, sticky='w', padx=4)
+        ttk.Label(bili, text='推荐随机翻页抽，所以每次推的都不一样（同一个夹子也不会老推那几条）',
+                  foreground='#888888').grid(row=2, column=1, columnspan=3, sticky='w', padx=4)
+
+        ttk.Label(bili, text='拿法：浏览器登录 bilibili.com → F12 → Application → Cookies → 复制 '
+                             'SESSDATA 的值（整条 Cookie 粘进来也行）；再点「读取收藏夹」选一个夹子',
+                  foreground='#888888', wraplength=760, justify='left').grid(
+            row=3, column=1, columnspan=3, sticky='w', padx=4, pady=(2, 0))
+        bili.columnconfigure(1, weight=1)
         video.columnconfigure(1, weight=1)
 
         # ---------------- 今日幸运值 ----------------
@@ -1016,6 +1050,57 @@ class AiPlayerGUI:
         ttk.Label(mass, text='发送时先向引擎要一份在线名单，再一个一个私聊；间隔太小容易被服务器当刷屏踢下线，'
                              '建议 0.3～1 秒。',
                   foreground='#888888', wraplength=780, justify='left').pack(anchor='w', padx=4)
+
+    def _on_bili_folders(self) -> None:
+        """读 B 站收藏夹：验证 Cookie + 把收藏夹填进下拉框。"""
+        cookie = (self.var_misc_bili_cookie.get() or '').strip()
+        if not cookie:
+            messagebox.showinfo('aafm AI 玩家',
+                                '先在左边填 SESSDATA（或整条 Cookie），再点「读取收藏夹」。')
+            return
+        self.var_misc_bili_status.set('正在读取…')
+
+        def work() -> None:
+            from . import bilibili
+            info = bilibili.login_info(cookie)
+            if not info.get('ok'):
+                msg = '❌ ' + str(info.get('message') or 'Cookie 无效')
+                self.root.after(0, lambda: self.var_misc_bili_status.set(msg))
+                return
+            res = bilibili.fav_folders(cookie)
+            name = str(info.get('name') or '')
+
+            def apply() -> None:
+                if not res.get('ok'):
+                    self.var_misc_bili_status.set('❌ ' + str(res.get('message') or '没读到'))
+                    return
+                folders = res.get('folders') or []
+                self._bili_fav_map = {}
+                labels = []
+                for f in folders:
+                    label = '%s（%s 个）' % (str(f.get('title') or ''),
+                                          int(f.get('count') or 0))
+                    self._bili_fav_map[label] = f
+                    labels.append(label)
+                self.cmb_bili_fav.configure(values=labels)
+                self.var_misc_bili_status.set('✅ %s：%s 个收藏夹' % (name or '已登录', len(labels)))
+                cur = int(getattr(self.controller.config.misc, 'biliFavMediaId', 0) or 0)
+                for label, f in self._bili_fav_map.items():
+                    if int(f.get('media_id') or 0) == cur:
+                        self.var_misc_bili_fav.set(label)
+                        self._bili_fav_cur = {'media_id': cur, 'name': str(f.get('title') or '')}
+                        break
+                else:
+                    if not (self.var_misc_bili_fav.get() or '').strip() and labels:
+                        first = self._bili_fav_map[labels[0]]
+                        self.var_misc_bili_fav.set(labels[0])
+                        self._bili_fav_cur = {'media_id': int(first.get('media_id') or 0),
+                                              'name': str(first.get('title') or '')}
+                self._append_log(f'已读取 B 站收藏夹：{name}，共 {len(labels)} 个', 'info')
+
+            self.root.after(0, apply)
+
+        threading.Thread(target=work, daemon=True).start()
 
     def _on_mass_send(self) -> None:
         """群发按钮：把输入框里的内容 /msg 给所有在线玩家。"""
@@ -2322,6 +2407,12 @@ class AiPlayerGUI:
             self.var_misc_checkin_text.set(misc.checkinText)
             self.var_misc_checkin_repeat.set(misc.checkinRepeatText)
             self.var_misc_checkin_off.set(misc.checkinOffText)
+            self.var_misc_bili_cookie.set(misc.biliCookie or '')
+            self._bili_fav_cur = {'media_id': int(misc.biliFavMediaId or 0),
+                                  'name': str(misc.biliFavName or '')}
+            self.var_misc_bili_fav.set(str(misc.biliFavName or ''))
+            self.var_misc_bili_status.set(
+                '已配置：%s' % misc.biliFavName if misc.biliFavName else '（还没读取）')
             self.var_misc_mass_gap.set(f'{float(misc.massGapSeconds):g}')
             self.var_misc_mass_skipself.set(bool(misc.massSkipSelf))
         if hasattr(self, '_netease_status'):
@@ -2625,6 +2716,18 @@ class AiPlayerGUI:
         misc.checkinText = self.var_misc_checkin_text.get().strip()
         misc.checkinRepeatText = self.var_misc_checkin_repeat.get().strip()
         misc.checkinOffText = self.var_misc_checkin_off.get().strip()
+        misc.biliCookie = self.var_misc_bili_cookie.get().strip()
+        sel = (self.var_misc_bili_fav.get() or '').strip()
+        folder = self._bili_fav_map.get(sel) if sel else None
+        if folder:
+            misc.biliFavMediaId = int(folder.get('media_id') or 0)
+            misc.biliFavName = str(folder.get('title') or '')
+        elif sel.isdigit():
+            misc.biliFavMediaId = int(sel)
+            misc.biliFavName = ''
+        else:                                   # 没重新读收藏夹：保留原来配的那个
+            misc.biliFavMediaId = int(self._bili_fav_cur.get('media_id') or 0)
+            misc.biliFavName = str(self._bili_fav_cur.get('name') or '')
         misc.massGapSeconds = self._parse_float(self.var_misc_mass_gap.get(), 0.5)
         misc.massSkipSelf = bool(self.var_misc_mass_skipself.get())
         misc.validate()

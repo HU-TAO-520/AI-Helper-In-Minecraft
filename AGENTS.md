@@ -60,6 +60,8 @@ powershell -ExecutionPolicy Bypass -File build_all.ps1
 - 帮助 / 好感度私聊或公屏回复都**不能包含半角 `[点歌]`**（会把 Mod 骗去点歌），统一用 `【点歌】`。
 - 好感度默认：聊天 +1 / 5 分钟、点歌 +2 / 1 分钟、每日首次 +1；数据在 `affinity.json`。
 - 视频推荐默认**发公屏**、来源**番剧追番榜**、**全服共用** 30 秒冷却；冷却过后再点要**换一批新的**（先避开刚推过的 id）。文案都在「杂项」页。
+- 视频来源**五选一**（`config.misc.videoSource`：`anime` / `home` / `hot` / `rank` / `fav`），GUI 的 `_VIDEO_SOURCE_KEYS/_LABELS` 顺序必须和 `config.VIDEO_SOURCES` 一致。选 `fav` 时靠 `misc.biliCookie`（整条 Cookie 或只填 `SESSDATA` 值都行，`bilibili.cookie_header` 会归一化）+ `misc.biliFavMediaId`，`tick`/推荐线程里**不要**偷偷换成别的来源（用户要求只能二选一）。
+- `bilibili.py` 用一个**共享 httpx.Client**（保留 cookie）：首页推荐必须先 `_warm()` 访问一次 `https://www.bilibili.com/` 拿 `buvid3`，否则直接干调会 `-412 request was banned`；该接口 `ps` 只能 12（`ps=30` 会 `-400 请求错误`），一次返回 30 条。收藏夹用 `x/v3/fav/resource/list`（`order=mtime`）**随机翻页** 2 页凑池子，失效条目（`attr` 位 / 标题含「已失效」）要跳过。
 - 群发私聊（GUI「杂项」页）逐个 `/msg`，每个玩家之间有间隔（默认 0.5 秒），别调太小（会被当刷屏踢）；自触发防线照旧要记 `_remember_sent`。
 - 「每日数据」一律走 `aafm_py/dailydb.py`（SQLite `daily.db`）：当天幸运值**第一次查询时随机定下来就落库**（别再用「日期+名字」现算，重启会变），签到记录也在这里。跨天由 `ensure_day()` 做「备份 → 删除 → 重建」，旧库进 `db_backup/db_backup_<时间>.db`，`player_stats`（连签/累计）要带到新库，不然连签会断。`tick` 里每秒调一次 `_maybe_daily_rotate()`。
 - 每日签到（`[提示词]签到`）默认：金币在 `[最少, 最多]` 随机 + 连签加成，物品默认不给；发奖励靠配置里那**两行命令**（`{player} {value} {item} {count}`），命令不写 `/` 会自动补，长度按整条命令算（≤250）。

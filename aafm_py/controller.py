@@ -1790,6 +1790,10 @@ class Controller:
         if not cfg.videoEnabled:
             self.send_chat('【视频推荐】这个功能没开（服主可在「杂项」页打开）')
             return
+        if (cfg.videoSource or '') == 'fav' and not (cfg.biliCookie or '').strip():
+            self.send_chat('【视频推荐】现在是「我的收藏夹」来源，但还没配 B 站 Cookie，'
+                           '服主在「杂项」页填一下 SESSDATA 就能用~')
+            return
         now = time.time()
         cool = float(cfg.videoCooldownSeconds)
         last = self._video_last_at
@@ -1807,21 +1811,27 @@ class Controller:
         from . import bilibili
         cfg = self._misc()
         source = cfg.videoSource or 'anime'
+        # 换收藏夹就当换了个来源，别把上一个夹子的「推过」记录带过来
+        seen_key = source if source != 'fav' else 'fav:%d' % int(cfg.biliFavMediaId or 0)
         count = int(cfg.videoCount or 5)
         # 最近推过的 id：换一批用（每个来源各记一份，保留最近 60 条）
         seen: Dict[str, List[str]] = getattr(self, '_video_seen', None) or {}
         self._video_seen = seen
-        used = list(seen.get(source) or [])
+        used = list(seen.get(seen_key) or [])
         items = []
         try:
-            items = bilibili.recommend(source, count, exclude=used)
+            items, why = bilibili.recommend_ex(source, count, exclude=used,
+                                               cookie=cfg.biliCookie,
+                                               media_id=cfg.biliFavMediaId)
         except Exception as e:  # noqa: BLE001
-            self._post_ui({'kind': 'log', 'level': 'warn',
-                           'message': f'[视频推荐] 抓取失败：{e}'})
+            why = f'{type(e).__name__}: {e}'
+            items = []
         if not items:
+            self._post_ui({'kind': 'log', 'level': 'warn',
+                           'message': f'[视频推荐] 抓取失败（{cfg.source_name()}）：{why}'})
             self.send_chat(cfg.videoFailText.replace('{player}', player))
             return
-        seen[source] = (used + [str(x.get('id')) for x in items])[-60:]
+        seen[seen_key] = (used + [str(x.get('id')) for x in items])[-60:]
         head = (cfg.videoTitle.replace('{player}', player)
                 .replace('{count}', str(len(items)))
                 .replace('{source}', cfg.source_name()))

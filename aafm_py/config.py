@@ -769,11 +769,13 @@ class AffinityConfig:
         self.dailyGain = _clamp_int(self.dailyGain, 0, 100)
 
 
-# 视频推荐来源
+# 视频推荐来源（GUI「杂项」页的下拉框按这个顺序 + `_VIDEO_SOURCE_KEYS` 对应）
 VIDEO_SOURCES = {
-    'anime': '番剧追番榜',     # pgc/web/rank/list?season_type=1
-    'hot': 'B 站首页热门',     # x/web-interface/popular
-    'rank': 'B 站全站排行',    # x/web-interface/ranking/v2
+    'anime': '番剧追番榜',        # pgc/web/rank/list?season_type=1
+    'home': 'B 站首页推荐',       # x/web-interface/index/top/rcmd（首页那排，需先拿 buvid3）
+    'hot': 'B 站首页热门',        # x/web-interface/popular
+    'rank': 'B 站全站排行',       # x/web-interface/ranking/v2
+    'fav': '我的收藏夹（登录）',   # x/v3/fav/resource/list（需 SESSDATA）
 }
 
 
@@ -791,7 +793,8 @@ class MiscConfig:
 
     # ---------------- 视频推荐 ----------------
     videoEnabled: bool = True
-    # 来源：anime=番剧追番榜（默认）/ hot=B 站首页热门 / rank=B 站全站排行
+    # 来源：anime=番剧追番榜（默认）/ home=B 站首页推荐 / hot=B 站首页热门 /
+    #       rank=B 站全站排行 / fav=我的收藏夹（要 Cookie）
     videoSource: str = 'anime'
     # 一次推几条
     videoCount: int = 5
@@ -805,6 +808,12 @@ class MiscConfig:
     videoCoolText: str = '【视频推荐】刚推过啦，{wait} 秒后再来（会换一批新的）'
     # 抓取失败
     videoFailText: str = '【视频推荐】B 站接口暂时抽风了，稍等一下再试~'
+    # 来源选「我的收藏夹」时才需要：B 站登录 Cookie（整条或只填 SESSDATA 值都行）
+    biliCookie: str = ''
+    # 收藏夹 id（GUI 可点「读取收藏夹」自动填）
+    biliFavMediaId: int = 0
+    # 收藏夹名字（只是显示用，方便认）
+    biliFavName: str = ''
 
     # ---------------- 今日幸运值 ----------------
     luckEnabled: bool = True
@@ -850,6 +859,9 @@ class MiscConfig:
                               or '【视频推荐】刚推过啦，{wait} 秒后再来（会换一批新的）')
         self.videoFailText = (str(self.videoFailText or '').strip()
                               or '【视频推荐】B 站接口暂时抽风了，稍等一下再试~')
+        self.biliCookie = str(self.biliCookie or '').strip()
+        self.biliFavMediaId = _clamp_int(self.biliFavMediaId, 0, 999_999_999)
+        self.biliFavName = str(self.biliFavName or '').strip()
         self.luckEnabled = bool(self.luckEnabled)
         self.luckMax = _clamp_int(self.luckMax, 10, 1000)
         self.luckText = (str(self.luckText or '').strip()
@@ -878,6 +890,8 @@ class MiscConfig:
 
     def source_name(self) -> str:
         """来源的中文名（给文案里的 {source} 用）。"""
+        if (self.videoSource or '') == 'fav' and (self.biliFavName or '').strip():
+            return '收藏夹「%s」' % str(self.biliFavName).strip()[:20]
         return VIDEO_SOURCES.get(self.videoSource or 'anime', VIDEO_SOURCES['anime'])
 
 

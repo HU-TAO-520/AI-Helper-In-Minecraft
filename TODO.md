@@ -82,3 +82,6 @@
 - [x] **每日数据落 SQLite（修「重启后今天的幸运值被重写」）**：新增 `aafm_py/dailydb.py`（`daily.db`）存**当天幸运值**（第一次查询随机定下来落库，重启/改上限都不再变）+ **当天签到**（`checkin` 表）+ 跨天累计 `player_stats`（连签天数/总次数）+ `meta.current_day`；跨天由 `ensure_day()` 做「备份 → 删除 → 重建」，旧库复制到 `db_backup/db_backup_<时间>.db`，`player_stats` 带到新库所以**连签不断**；`tick` 里每秒 `_maybe_daily_rotate()` 兜跨天
 - [x] 每日签到：`[提示词]签到`（也认 打卡/checkin/每日签到）每天一次，金币在 `[最少, 最多]` 随机 + 连签加成，物品可选；奖励由**两行命令**发放（`{player} {value} {item} {count}`，不写 `/` 自动补，整条 ≤250 字符，发前 `_remember_sent`）；帮助里加了签到行。实测：首次 → `/eco give …` + `/give …` + 成功文案；同天再签 → 只回「今天已经签过啦」；重启进程后幸运值与签到状态都还在
 
+- [x] 视频推荐新增两个来源（**五选一**，GUI 下拉框）：`home` = **B 站首页推荐**（`x/web-interface/index/top/rcmd`，先访问一次 bilibili.com 拿 `buvid3` 再调才不会被 `-412 request was banned`；`ps` 只能 12，一次 30 条，实测连推 3 批 0 重合）；`fav` = **我的收藏夹**（`x/v3/fav/resource/list?order=mtime`，**随机翻页 2 页**凑池子，跳过失效条目）。实测：home 3/3 成功、fav 抽到 5 条可用视频；其余来源 1 个没坏
+- [x] 收藏夹要登录：`misc.biliCookie`（整条 Cookie 或只填 SESSDATA 值，`cookie_header` 归一化）+ `misc.biliFavMediaId` + `biliFavName`（只用于显示，文案里 `{source}` 会显示成「收藏夹「名字」」）；GUI「杂项 → B 站账号」有 SESSDATA 输入（密码框）+ **「读取收藏夹」按钮**（后台线程调 `login_info`/`fav_folders`，把自建+收藏的夹子填进**可选下拉框**，也能直接填收藏夹 id）+ 状态提示；选 fav 但没配 Cookie 时**在冷却之前**就公屏提示，不白扣冷却。换夹子时「推过」记录按 `fav:<media_id>` 分开记
+
