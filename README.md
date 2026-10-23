@@ -2,7 +2,7 @@
 
 # AI Helper In Minecraft
 
-**当前版本：v3.2.0**
+**当前版本：v0.3.1**（语义化版本；旧编号 v1.0 → v0.1.0、v2.0 → v0.2.0、v3.x → v0.3.x，旧 tag 保留不动）
 
 一个"无客户端"的 Minecraft AI 玩家：不需要打开游戏本体，用 GUI 控制 mineflayer 引擎进入服务器，由大模型驱动它在游戏内与人聊天互动。
 
@@ -43,8 +43,13 @@
 
 ## 更新日志
 
-### v3.2.1
+> **版本号从 v0.3.1 起改用语义化版本**（`MAJOR.MINOR.PATCH`：不兼容改动升 MAJOR、加功能升 MINOR、修 bug 升 PATCH）。
+> 旧编号对应关系：`v1.0 → v0.1.0`、`v2.0 → v0.2.0`、`v3.x → v0.3.x`。**旧 tag 和已发的 Release 保留不动**，
+> 下面的历史条目仍用当时的写法。Mod（`mc-song-mod/`）的版本号跟项目一起走：本项目 `v0.3.1` ↔ Mod `0.1.0`。
 
+### v0.3.1
+
+- **版本号改为语义化**：项目从 `v3.2.1` 重编为 **`v0.3.1`**，客户端 Mod 从 `1.0.0` 重编为 **`0.1.0`**（jar 名相应变成 `Song_0.1.0_<游戏版本>.jar`）。
 - **`[提示词]帮助`**：在聊天里发 `[DiaoHelper]帮助` → 机器人**私聊**你一份机器人用法（怎么聊天、怎么点歌、怎么停止、怎么查好感度、视频推荐、幸运值、还支持哪些命令）。**提示词 = 「玩家配置 → 触发正则」里配的那些**（`[DiaoHelper]`、`@DiaoHelper`…），跟点歌的 `[点歌]` 不是一回事。帮助文本里**故意不出现半角 `[点歌]`**（用 `【点歌】`），否则装了 Mod 的玩家会把帮助也当成一次点歌。
 - **好感度（新功能）**：`[DiaoHelper]好感度` 查询自己的分数/等级/距离下一档还差多少，`[DiaoHelper]好感度 玩家名` 看别人。默认规则：聊天 +1（5 分钟冷却）、点歌成功 +2（1 分钟冷却）、每天首次互动额外 +1；等级 陌生人 → 脸熟 → 熟人 → 朋友 → 好朋友 → 挚友。数据存 `affinity.json`，配置在 `config.json` 的 `affinity` 段（开关/加分/冷却/每日加成都可改）。
 - **新增 [`HELP.md`](HELP.md)**：给玩家看的完整说明书（点歌、好感度、视频推荐、幸运值、常见问题、给服主的配置表），也是 `[提示词]帮助` 私聊内容的完整版。
@@ -157,7 +162,7 @@
 │  ├─ src/legacy/java/... #   1.21.x（mojmap + 重映射 Loom，含游戏内「点歌台」界面）
 │  ├─ src/modern/java/... #   26.x（未混淆 + Java 25，无界面）
 │  ├─ build_all.ps1       #   一键构建 1.21.1~26.2 全部版本
-│  └─ dist/               #   Song_<项目版本>_<游戏版本>.jar（如 Song_1.0.0_1.21.11.jar）
+│  └─ dist/               #   Song_<项目版本>_<游戏版本>.jar（如 Song_0.1.0_1.21.11.jar）
 ├─ mc-music-bridge/       # 服务端点歌插件（可选，给能装插件的服务器）：ZMusicBridge
 │  ├─ src/main/java/...   #   zmusic:packet 协议编码 + 网易云搜索 + 点歌逻辑
 │  └─ dist/               #   已构建好的 ZMusicBridge-1.0.0.jar
@@ -336,3 +341,15 @@ npm run login:msa          # 仅执行微软账号登录
 
 > 说明：Mod 里内嵌的 MP3 解码库 **JLayer** 是 LGPL 授权的第三方组件（`com.googlecode.soundlibs:jlayer`），
 > 与本项目自身的 Apache-2.0 授权相互独立；二次分发时请一并遵守其许可。
+
+## 贡献者 / Contributors
+
+感谢所有为本项目做出贡献的人：
+Thanks to everyone who has contributed to this project:
+
+<a href="https://github.com/QingCheng3962/AI-Helper-In-Minecraft/graphs/contributors">
+  <img src="https://contrib.rocks/image?repo=QingCheng3962/AI-Helper-In-Minecraft" />
+</a>
+
+> 想参与？欢迎提 Issue / PR（Bug 反馈、功能建议、文档修正、多版本兼容测试都算）。
+> Want to help? Issues and PRs are welcome — bug reports, feature ideas, doc fixes and multi-version test results all count.

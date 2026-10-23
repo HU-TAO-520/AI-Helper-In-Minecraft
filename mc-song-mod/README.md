@@ -105,7 +105,7 @@
 powershell -ExecutionPolicy Bypass -File build_all.ps1   # 1.21.1~26.2 全量
 ```
 
-产物在 `dist/`，命名 **`Song_<项目版本>_<游戏版本>.jar`**，例如 `Song_1.0.0_1.21.11.jar`。
+产物在 `dist/`，命名 **`Song_<项目版本>_<游戏版本>.jar`**，例如 `Song_0.1.0_1.21.11.jar`。
 
 ## 已知限制
 

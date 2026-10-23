@@ -2,7 +2,7 @@
 
 # AI Helper In Minecraft
 
-**Current version: v3.2.0**
+**Current version: v0.3.1** (SemVer; legacy numbering v1.0 → v0.1.0, v2.0 → v0.2.0, v3.x → v0.3.x — old tags are kept as-is)
 
 A "client-less" Minecraft AI player: it never opens the game itself. A GUI drives a mineflayer engine to join a server, and a large language model powers the in-game chat behaviour.
 
@@ -31,7 +31,14 @@ A "client-less" Minecraft AI player: it never opens the game itself. A GUI drive
 
 ## Changelog
 
-### v3.2.1
+> **From v0.3.1 the project follows Semantic Versioning** (`MAJOR.MINOR.PATCH`: breaking → MAJOR, features → MINOR, fixes → PATCH).
+> Legacy numbering: `v1.0 → v0.1.0`, `v2.0 → v0.2.0`, `v3.x → v0.3.x`. **Old tags / published releases stay untouched**,
+> and the historical entries below keep their original labels. The client mod (`mc-song-mod/`) is versioned together with the project:
+> project `v0.3.1` ↔ mod `0.1.0`.
+
+### v0.3.1
+
+- **SemVer switch**: the project was renumbered from `v3.2.1` to **`v0.3.1`**, and the client mod from `1.0.0` to **`0.1.0`** (jars are now named `Song_0.1.0_<gameVersion>.jar`).
 
 - **`[提示词]帮助` (help)**: send `[DiaoHelper]帮助` → the bot **whispers** you a usage guide (chat, song requests, stop, affinity, video recommendations, lucky value, other commands). The **提示词 is whatever is configured under 玩家配置 → 触发正则** (`[DiaoHelper]`, `@DiaoHelper`…), *not* the song trigger `[点歌]`. The help text deliberately avoids the half-width `[点歌]` (uses `【点歌】`) so modded clients don't mistake it for a song request.
 - **Affinity (new)**: `[DiaoHelper]好感度` shows your score / level / points to the next level; `[DiaoHelper]好感度 <player>` shows someone else's. Defaults: +1 per AI reply (5 min cooldown), +2 per successful song request (1 min), +1 bonus on the first interaction of each day; levels 陌生人 → 脸熟 → 熟人 → 朋友 → 好朋友 → 挚友. Stored in `affinity.json`, configured under `affinity` in `config.json`.
